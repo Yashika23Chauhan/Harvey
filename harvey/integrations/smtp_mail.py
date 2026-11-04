@@ -10,7 +10,8 @@ a Google Workspace account with an app password, or self-hosted mail.
     SMTP_PASSWORD=        IMAP_PASSWORD=   (defaults to SMTP_PASSWORD)
 
 Sends as the configured persona (name + email). IMAP polling fetches
-UNSEEN inbox messages and marks them seen after retrieval.
+UNSEEN inbox messages without marking them read, and reads the Sent folder
+(read-only) for replies you wrote from your own mail app.
 """
 
 import asyncio
@@ -18,6 +19,9 @@ import email
 import email.policy
 import imaplib
 import logging
+import re
+import socket
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import make_msgid, parseaddr
 
@@ -34,6 +38,32 @@ from harvey.integrations.signature import SignatureError, load_signature, set_bo
 logger = logging.getLogger("harvey.smtp")
 
 
+class _IMAP4_SSL(imaplib.IMAP4_SSL):
+    """IMAP over TLS that tries IPv4 addresses first.
+
+    Some networks hand out IPv6 routes that never connect; Python then waits
+    ~21s per connection before falling back, which made every heartbeat's
+    inbox read crawl. TLS still verifies the real hostname."""
+
+    def _create_socket(self, timeout):
+        if timeout is not None and not timeout:
+            raise ValueError("Non-blocking socket (timeout=0) is not supported")
+        infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)
+        infos.sort(key=lambda i: i[0] != socket.AF_INET)
+        last = None
+        for family, kind, proto, _, addr in infos:
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(timeout if timeout is not None else 15)
+                sock.connect(addr)
+                sock.settimeout(timeout)
+                return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
+            except OSError as e:
+                sock.close()
+                last = e
+        raise last or OSError(f"can't connect to {self.host}")
+
+
 class SmtpImapProvider(MailProvider):
     name = "smtp"
 
@@ -47,6 +77,11 @@ class SmtpImapProvider(MailProvider):
         self.imap_port = int(getattr(env, "imap_port", 993) or 993)
         self.imap_user = getattr(env, "imap_username", "") or self.smtp_user
         self.imap_pass = getattr(env, "imap_password", "") or self.smtp_pass
+        # Messages are read without marking them read, so the inbox's UIDs
+        # remember where the last fully handled read stopped.
+        self._next_uid = 0          # 0: not known yet, read the newest unread
+        self._read_up_to = 0        # highest UID the last read returned
+        self._uidvalidity = None
 
     def is_configured(self) -> bool:
         return bool(self.smtp_host and self.smtp_user and self.smtp_pass)
@@ -99,18 +134,94 @@ class SmtpImapProvider(MailProvider):
             logger.error(f"IMAP fetch failed: {e}")
             return []
 
+    def confirm_read(self) -> None:
+        """Everything the last read returned was handled: next time, read
+        only mail that arrived after it."""
+        if self._read_up_to:
+            self._next_uid = max(self._next_uid, self._read_up_to + 1)
+
+    async def get_sent(self, limit: int = 30) -> list[InboundMessage]:
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, self._fetch_sent, limit)
+        except Exception as e:
+            logger.error(f"IMAP sent-folder fetch failed: {e}")
+            return []
+
+    @staticmethod
+    def _sent_mailbox(conn) -> str | None:
+        """The Sent folder's name, from its \\Sent flag (Gmail's "[Gmail]/Sent
+        Mail", Outlook's "Sent Items"), else a folder named like one."""
+        status, rows = conn.list()
+        if status != "OK":
+            return None
+        named = None
+        for raw in rows or []:
+            line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+            m = re.match(r'\((?P<flags>[^)]*)\)\s+(?:"[^"]*"|NIL)\s+(?P<name>.+)$', line)
+            if not m:
+                continue
+            name = m.group("name").strip()
+            if "\\sent" in m.group("flags").lower():
+                return name
+            if named is None and name.strip('"').lower() in ("sent", "sent items", "sent mail", "inbox.sent"):
+                named = name
+        return named
+
+    def _fetch_sent(self, limit: int) -> list[InboundMessage]:
+        out: list[InboundMessage] = []
+        conn = _IMAP4_SSL(self.imap_host, self.imap_port)
+        try:
+            conn.login(self.imap_user, self.imap_pass)
+            box = self._sent_mailbox(conn)
+            if not box:
+                return []
+            status, _ = conn.select(box, readonly=True)
+            if status != "OK":
+                return []
+            since = (datetime.now() - timedelta(days=7)).strftime("%d-%b-%Y")
+            status, data = conn.search(None, "SINCE", since)
+            if status != "OK":
+                return []
+            for msg_id in data[0].split()[-limit:]:
+                status, parts = conn.fetch(msg_id, "(BODY.PEEK[])")
+                if status != "OK" or not parts or not isinstance(parts[0], tuple):
+                    continue
+                parsed = self._parse_rfc822(parts[0][1])
+                if parsed and parsed.to_email:
+                    out.append(parsed)
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+        return out
+
     def _fetch_unseen(self, limit: int) -> list[InboundMessage]:
         out: list[InboundMessage] = []
-        conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
+        conn = _IMAP4_SSL(self.imap_host, self.imap_port)
         try:
             conn.login(self.imap_user, self.imap_pass)
             conn.select("INBOX")
-            status, data = conn.search(None, "UNSEEN")
+            validity = (conn.response("UIDVALIDITY")[1] or [None])[0]
+            if validity != self._uidvalidity:
+                self._uidvalidity, self._next_uid = validity, 0  # mailbox rebuilt: start over
+            uidnext = (conn.response("UIDNEXT")[1] or [None])[0]
+            if uidnext:
+                # Everything already in the mailbox counts as read up to here.
+                self._read_up_to = max(self._read_up_to, int(uidnext) - 1)
+            # Once the position is known, read every new message, opened or not:
+            # you may read a customer's email in Gmail or Outlook before Harvey does.
+            criteria = (f"UID {self._next_uid}:*",) if self._next_uid else ("UNSEEN",)
+            status, data = conn.uid("SEARCH", None, *criteria)
             if status != "OK":
                 return []
-            ids = data[0].split()[-limit:]
-            for msg_id in ids:
-                status, parts = conn.fetch(msg_id, "(RFC822)")
+            uids = [int(u) for u in data[0].split() if int(u) >= self._next_uid][-limit:]
+            for uid in uids:
+                # PEEK leaves the message unread: the mailbox may be someone's
+                # personal inbox, and processed_replies already dedups.
+                status, parts = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                self._read_up_to = max(self._read_up_to, uid)
                 if status != "OK" or not parts or not isinstance(parts[0], tuple):
                     continue
                 parsed = self._parse_rfc822(parts[0][1])
@@ -156,6 +267,7 @@ class SmtpImapProvider(MailProvider):
             thread_ref=str(msg.get("In-Reply-To", "")).strip(),
             date=str(msg.get("Date", "")),
             is_bounce=looks_like_bounce(from_email, subject),
+            to_email=parseaddr(str(msg.get("To", "")))[1].lower(),
         )
 
     async def test_connection(self) -> tuple[bool, str]:
@@ -177,7 +289,7 @@ class SmtpImapProvider(MailProvider):
         loop = asyncio.get_event_loop()
 
         def _imap_check():
-            conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
+            conn = _IMAP4_SSL(self.imap_host, self.imap_port)
             try:
                 conn.login(self.imap_user, self.imap_pass)
             finally:

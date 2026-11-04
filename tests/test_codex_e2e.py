@@ -492,6 +492,8 @@ async def test_fixture_transport_is_the_only_mail_path(harvey):
     harvey.monkeypatch.setattr(smtplib, "SMTP", refuse)
     harvey.monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
     harvey.monkeypatch.setattr(imaplib, "IMAP4_SSL", refuse)
+    import harvey.integrations.smtp_mail as smtp_mail
+    harvey.monkeypatch.setattr(smtp_mail, "_IMAP4_SSL", refuse)
     await _approved_item(harvey.state)
     await harvey.run_cycles(1)
     assert len(harvey.mail.sent) == 1

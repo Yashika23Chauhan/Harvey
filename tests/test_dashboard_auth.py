@@ -77,6 +77,8 @@ def _protected_requests():
             continue
         if route.path in ("/", "/static/{path:path}"):
             continue
+        if route.path.startswith("/auth/"):
+            continue  # the sign-in page hands the token out: tests/test_dashboard_login.py
         path = re.sub(r"\{[^}]+\}", "x", route.path)
         for method in sorted(route.methods - {"HEAD"}):
             out.append((method, path))

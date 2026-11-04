@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from datetime import datetime, time, timedelta
@@ -232,6 +233,35 @@ async def _interruptible_sleep(seconds: float, stop_event: asyncio.Event) -> boo
         return False
 
 
+async def _heartbeat_sleep(seconds: float, stop_event: asyncio.Event) -> bool:
+    """Sleep until the next heartbeat, waking early on shutdown or when the
+    dashboard asks (a reply or approval to send now: harvey.paths.WAKE_FILE).
+
+    Returns True if a shutdown was requested during the sleep.
+    """
+    from harvey.paths import WAKE_FILE
+
+    async def woken():
+        while not WAKE_FILE.exists():
+            await asyncio.sleep(1)
+        try:
+            WAKE_FILE.unlink()
+        except OSError:
+            pass
+        logger.info("Woken by the dashboard: running the next cycle now.")
+
+    sleep = asyncio.ensure_future(_interruptible_sleep(seconds, stop_event))
+    watch = asyncio.ensure_future(woken())
+    try:
+        done, _ = await asyncio.wait({sleep, watch}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (sleep, watch):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(sleep, watch, return_exceptions=True)
+    return sleep in done and sleep.result()
+
+
 def send_hold_reason(unread: list, paused: str, read_problem: str) -> str | None:
     """What to record about this cycle's send phase: why sending is held by
     unread replies, "" when it ran (clear the note), or None to leave the
@@ -395,7 +425,10 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                                + summary.get("auto_reply_handoffs", 0)) > 0
 
             if action == "prospect":
-                tasks.append(("prospect", scout.run()))
+                # HARVEY_NO_PROSPECTING=1 keeps a demo database free of real
+                # businesses; sending and replies still run.
+                if os.environ.get("HARVEY_NO_PROSPECTING", "").strip() != "1":
+                    tasks.append(("prospect", scout.run()))
                 # Analyst is cheap (no Claude calls) — keep analytics fresh
                 tasks.append(("analyze", analyst.run()))
             elif action == "write_campaign":
@@ -460,7 +493,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             logger.info(
                 f"Cycle complete. Sleeping for {config.usage.heartbeat_interval_minutes} minutes."
             )
-            if await _interruptible_sleep(interval, stop_event):
+            if await _heartbeat_sleep(interval, stop_event):
                 break
 
         except (KeyboardInterrupt, asyncio.CancelledError):

@@ -740,7 +740,8 @@ class Handler:
         # queued sequence email for them is now wrong to send.
         await self.state.update_prospect_status(prospect.id, "replied")
         try:
-            cancelled = await self.state.cancel_pending_outbox_for_prospect(prospect.id)
+            cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                prospect.id, keep_your_replies=True)
             if cancelled:
                 logger.info(
                     f"Handler: cancelled {cancelled} queued email(s) for "
@@ -1045,12 +1046,59 @@ class Handler:
             logger.info(f"Handler: processed {handled} inbound message(s).")
         else:
             logger.info("Handler: no new replies.")
+        try:
+            await self._sync_own_replies()
+        except Exception as e:
+            logger.error(f"Handler: reading your sent mail failed: {e}")
         if complete:
             # Every reply read was handled: the provider may start its next
             # read after these (Gmail's history marker). Not otherwise, so
             # what wasn't handled is read again.
             self.provider.confirm_read()
         return complete
+
+    async def _sync_own_replies(self):
+        """Add replies you wrote in your own mail app (Gmail, Outlook) to the
+        conversation they answer, so the thread shows both sides. Mail Harvey
+        sent itself is already there. A draft Harvey had waiting for that
+        conversation is withdrawn: you've answered."""
+        from email.utils import parsedate_to_datetime
+
+        from harvey.integrations.mail_provider import strip_quoted_reply
+        from harvey.models.conversation import Message
+
+        for msg in await self.provider.get_sent():
+            key = "sent:" + (msg.message_id or msg.provider_id)
+            if await self.state.is_reply_processed(key):
+                continue
+            try:
+                if msg.message_id and await self.state.find_outbox_by_message_id(msg.message_id):
+                    continue  # Harvey sent this one; it's in the thread already
+                prospect = await self.state.get_prospect_by_email(msg.to_email)
+                if not prospect:
+                    continue
+                convos = [c for status in ("needs_human", "open", "closed")
+                          for c in await self.state.get_conversations_by_status(status)
+                          if c.prospect_id == prospect.id]
+                if not convos:
+                    continue
+                convo = max(convos, key=lambda c: c.updated_at)
+                text = strip_quoted_reply(msg.body).strip()
+                if not text:
+                    continue
+                try:
+                    when = parsedate_to_datetime(msg.date).astimezone(timezone.utc).replace(tzinfo=None)
+                except Exception:
+                    when = datetime.now(timezone.utc).replace(tzinfo=None)
+                convo.thread.append(Message(sender="you", content=text, timestamp=when))
+                convo.thread.sort(key=lambda m: m.timestamp)
+                await self.state.update_conversation(convo.id, thread_json=convo.thread_json())
+                for item in await self.state.get_outbox(status="pending_review", kind="reply"):
+                    if item.get("conversation_id") == convo.id:
+                        await self.state.reject_outbox_item(item["id"])
+                logger.info(f"Handler: your reply to {prospect.email} added to the conversation.")
+            finally:
+                await self.state.mark_reply_processed(key)
 
     async def _handle_bounce(self, msg):
         """A bounce is a data bug AND a reputation threat. Fix both."""
@@ -1108,6 +1156,14 @@ class Handler:
         )
         # The first reply since you undid their opt-out waits for you, even
         # on autopilot: the undo panel promises it.
+        # The dropdown on this conversation wins over Settings: "auto" sends
+        # on its own (still through the autopilot review), "approve" waits.
+        approved_by = "autopilot"
+        mode = await self.state.get_setting("reply_mode:" + convo.id) if convo.id else ""
+        if mode == "auto":
+            require_approval, approved_by = False, "auto-convo"
+        elif mode == "approve":
+            require_approval = True
         review_key = REVIEW_NEXT_REPLY_KEY + prospect.id
         if await self.state.get_setting(review_key):
             require_approval = True
@@ -1127,7 +1183,7 @@ class Handler:
             provider=self.provider.name if self.provider else "",
             thread_ref=reply_meta.get("thread_ref", ""),
             in_reply_to=reply_meta.get("message_id", ""),
-            approved_by="" if require_approval else "autopilot",
+            approved_by="" if require_approval else approved_by,
         )
         if item_id:
             await self.state.delete_setting(review_key)
@@ -1204,6 +1260,11 @@ Respond with ONLY the category label, nothing else."""
 
         if intent == "escalate":
             return current_stage  # Human decides what happens next
+
+        # Someone marked lost who writes back interested (or with a question
+        # or objection) has reopened the conversation: start again at engaged.
+        if current_stage == "closed_lost" and intent in ("interested", "question", "objection"):
+            return "engaged"
 
         # Stage advancement rules
         if intent == "interested":

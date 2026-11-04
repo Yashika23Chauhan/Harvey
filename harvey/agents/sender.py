@@ -40,6 +40,9 @@ MIN_FOLLOW_UP_GAP = timedelta(days=1)
 
 logger = logging.getLogger("harvey.sender")
 
+# campaign_id of a reply you typed in the Conversations tab (dashboard).
+MANUAL_REPLY = "manual-reply"
+
 # Max sends drained per heartbeat cycle — spreads volume through the day
 # instead of bursting the daily cap in one minute.
 MAX_SENDS_PER_CYCLE = 8
@@ -1070,8 +1073,10 @@ class Sender:
                     convo = await self.state.get_conversation(item["conversation_id"])
                     if convo:
                         from harvey.models.conversation import Message
+                        # A reply you typed in Conversations is yours, not Harvey's.
+                        author = "you" if item.get("campaign_id") == MANUAL_REPLY else "harvey"
                         convo.thread.append(
-                            Message(sender="harvey", content=item["body"])
+                            Message(sender=author, content=item["body"])
                         )
                         await self.state.update_conversation(
                             convo.id, thread_json=convo.thread_json()

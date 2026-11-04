@@ -319,16 +319,18 @@ async function lockIfRefused(r) {
   showLock(r.status === 503
     ? 'The dashboard server can\'t use its token file, so it is refusing every request. ' + why
     : authToken()
-      ? 'The saved token was not accepted (the dashboard may have a new one).'
-      : 'This tab doesn\'t have the dashboard token yet.');
+      ? 'Your session ended. Please sign in again.'
+      : '');
   return true;
 }
 
 function showLock(reason) {
+  const wasLocked = _locked;
   _locked = true;
   const el = document.getElementById('lock-screen');
   if (!el) return;
   document.getElementById('lock-reason').textContent = reason;
+  if (!wasLocked) initAuthMode();
   el.style.display = 'flex';
   const dot = document.getElementById('header-dot');
   const text = document.getElementById('header-status-text');
@@ -342,19 +344,78 @@ function hideLock() {
   if (el) el.style.display = 'none';
 }
 
-function unlockWithToken(event) {
+// ── Sign in (the first visit creates the one account) ──
+
+let _authMode = 'login';
+
+async function initAuthMode() {
+  try {
+    const r = await authFetch('/auth/status');
+    const s = await r.json();
+    setAuthMode(s.signup_open ? 'signup' : 'login');
+  } catch {
+    setAuthMode('login');
+  }
+}
+
+function setAuthMode(mode) {
+  _authMode = mode;
+  const signup = mode === 'signup';
+  document.getElementById('auth-title').textContent = signup ? 'Create your account' : 'Sign in';
+  document.getElementById('auth-sub').textContent = signup
+    ? 'Set up a username and password for this dashboard.'
+    : 'Welcome back. Sign in to your sales dashboard.';
+  document.getElementById('auth-submit').textContent = signup ? 'Create account' : 'Sign in';
+  document.getElementById('auth-confirm-group').style.display = signup ? '' : 'none';
+  document.getElementById('auth-confirm').required = signup;
+  document.getElementById('auth-password').autocomplete = signup ? 'new-password' : 'current-password';
+  document.getElementById('auth-username').focus();
+}
+
+function switchAuthMode(mode) {
+  document.getElementById('lock-reason').textContent = '';
+  setAuthMode(mode);
+}
+
+async function submitAuth(event) {
   event.preventDefault();
-  const input = document.getElementById('lock-token');
-  const value = (input.value || '').trim();
-  input.value = '';
-  if (!setAuthToken(value)) {
-    document.getElementById('lock-reason').textContent =
-      'That doesn\'t look like a dashboard token. Copy it again from the link or data/dashboard-token.';
+  const err = document.getElementById('lock-reason');
+  const btn = document.getElementById('auth-submit');
+  const username = document.getElementById('auth-username').value.trim();
+  const pw = document.getElementById('auth-password');
+  const confirm = document.getElementById('auth-confirm');
+  err.textContent = '';
+  if (_authMode === 'signup' && pw.value !== confirm.value) {
+    err.textContent = 'The passwords don\'t match.';
     return;
   }
-  hideLock();
-  loadCurrentTab();
-  loadHarveyStatus();
+  btn.disabled = true;
+  try {
+    const r = await authFetch('/auth/' + (_authMode === 'signup' ? 'signup' : 'login'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password: pw.value}),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.token || !setAuthToken(body.token)) {
+      err.textContent = body.message || 'Something went wrong. Try again.';
+      return;
+    }
+    pw.value = ''; confirm.value = '';
+    hideLock();
+    loadCurrentTab();
+    loadHarveyStatus();
+  } catch {
+    err.textContent = 'Can\'t reach the dashboard server. Is it running?';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function signOut() {
+  clearAuthToken();
+  showLock('');
+  switchAuthMode('login');
 }
 
 // Downloads go through the same authorised fetch and are handed to the
@@ -410,6 +471,7 @@ function loadCurrentTab() {
     case 'today': loadLiveStatus(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
+    case 'leads': loadLeadRequest(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
@@ -417,6 +479,7 @@ function loadCurrentTab() {
     case 'conversations': loadConversations(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
+    case 'integrations': loadIntegrations(); break;
     case 'settings': loadSettings(); loadSendingModeCard(); break;
     case 'controls': loadHarveyStatus(); loadLogs(); break;
   }
@@ -438,7 +501,7 @@ async function loadToday() {
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
-  navCount('nav-conversations', (data.stats || {}).needs_human || 0);
+  navCount('nav-conversations', convoBadge(data.stats));
   _todayStats = data.stats || {};
   renderFigures(_todayStats);
 
@@ -1213,6 +1276,26 @@ async function exportCohort(button) {
 function pageCohort(dir) {
   _cohortOffset = Math.max(0, _cohortOffset + dir * COHORT_PAGE);
   runCohort();
+}
+
+// ── API Integration ──
+
+async function loadIntegrations() {
+  const data = await api('/api/settings');
+  if (!data) return;
+  const isSet = !!data.tinyfish_api_key_set;
+  const el = document.getElementById('tinyfish-key');
+  el.value = '';
+  el.placeholder = isSet ? 'Saved — enter new value to change' : 'Enter your TinyFish API key';
+  const tag = document.getElementById('tinyfish-status');
+  tag.className = 'email-tag ' + (isSet ? 'verified' : 'guess');
+  tag.textContent = isSet ? 'set' : 'not set';
+}
+
+function saveTinyfish() {
+  const key = document.getElementById('tinyfish-key').value;
+  if (!key) { showToast('Enter your TinyFish API key first.', 'error'); return; }
+  saveEnv({TINYFISH_API_KEY: key}, 'TinyFish key saved.').then(loadIntegrations);
 }
 
 // ── Settings ──
@@ -2504,7 +2587,7 @@ const STAGE_LABELS = {
   negotiating: 'Negotiating', closing: 'Closing', closed_won: 'Won', closed_lost: 'Lost',
 };
 const CONVO_FILTERS = [
-  ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human'],
+  ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human' || !!c.new],
   ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply'],
   ['awaiting', 'Awaiting reply', c => c.status === 'awaiting_reply'],
   ['closed', 'Closed', c => c.status === 'closed'],
@@ -2537,7 +2620,7 @@ function renderConversations() {
       '" onclick="setConvoFilter(\'' + f[0] + '\')">' + f[1] + ' <span class="n">' +
       _convos.filter(f[2]).length + '</span></button>').join('') + '</div></div>';
   // Handed-to-you first, then drafts waiting; otherwise newest first (as served).
-  const rank = c => c.status === 'needs_human' ? 0 : c.draft ? 1 : 2;
+  const rank = c => c.status === 'needs_human' ? 0 : c.new ? 1 : c.draft ? 2 : 3;
   const shown = _convos.filter(filter[2]).map((c, i) => [c, i])
     .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(x => x[0]);
   if (!shown.length) {
@@ -2545,7 +2628,49 @@ function renderConversations() {
       'No conversation matches this filter.') + '</div>';
     return;
   }
-  el.innerHTML = bar + shown.map(convoCard).join('');
+  const key = c => c.id || ('await-' + (c.prospect_email || ''));
+  if (!shown.some(c => key(c) === _convoSelected)) _convoSelected = key(shown[0]);
+  const selected = shown.find(c => key(c) === _convoSelected);
+  // Keep the open thread's scroll across the 5-second refresh; follow new
+  // messages only when you were already at the bottom.
+  const oldPane = document.querySelector('.convo-pane');
+  const wasAtBottom = !oldPane || oldPane.scrollHeight - oldPane.scrollTop - oldPane.clientHeight < 40;
+  const keepScroll = oldPane && oldPane.dataset.key === _convoSelected ? oldPane.scrollTop : null;
+  const list = shown.map(c => {
+    const last = convoLastMessage(c);
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company || c.prospect_email || 'Unknown';
+    return '<button class="convo-item' + (key(c) === _convoSelected ? ' on' : '') + (c.new ? ' unread' : '') +
+      '" onclick="selectConvo(' + jsq(key(c)) + ')">' +
+      '<span class="avatar">' + initials(c.first_name, c.last_name) + '</span>' +
+      '<span class="ci-main"><span class="ci-top"><b>' + escHtml(name) + '</b>' +
+        '<span class="ci-when">' + (last.ts ? relTime(last.ts) : '') + '</span></span>' +
+      '<span class="ci-preview">' + escHtml(last.text) + '</span></span>' +
+      (c.new ? '<span class="ci-dot" title="New message"></span>' : c.draft ? '<span class="ci-draft">Draft</span>' : '') +
+      '</button>';
+  }).join('');
+  el.innerHTML = bar + '<div class="convo-layout"><div class="convo-list">' + list + '</div>' +
+    '<div class="convo-pane" data-key="' + escHtml(_convoSelected) + '">' + convoCard(selected) + '</div></div>';
+  const pane = el.querySelector('.convo-pane');
+  if (keepScroll !== null && !wasAtBottom) pane.scrollTop = keepScroll;
+  else pane.scrollTop = pane.scrollHeight;
+}
+
+let _convoSelected = '';
+
+function selectConvo(k) {
+  if (replyInProgress() && !confirm('Discard the reply you were writing?')) return;
+  _convoSelected = k;
+  renderConversations();
+}
+
+// The newest thing in a thread, for the list preview.
+function convoLastMessage(c) {
+  const all = (c.thread || []).map(m => ({ts: m.timestamp, text: (m.sender === 'prospect' ? '' : 'You: ') + m.content}))
+    .concat((c.emails || []).map(e => ({ts: e.sent_at, text: 'You: ' + (e.subject || e.body || '')})))
+    .concat((c.outgoing || []).map(m => ({ts: m.timestamp, text: 'Sending: ' + m.content})));
+  all.sort((a, b) => (+parseTs(a.ts) || 0) - (+parseTs(b.ts) || 0));
+  const last = all[all.length - 1] || {ts: c.updated_at, text: ''};
+  return {ts: last.ts, text: (last.text || '').replace(/\s+/g, ' ').slice(0, 90)};
 }
 
 function convoCard(c) {
@@ -2562,16 +2687,27 @@ function convoCard(c) {
         '<span class="te-when">' + relTime(it.email.sent_at) + '</span></div>' +
         '<div class="te-body">' + escHtml(it.email.body) + '</div></div>';
     }
-    const m = it.msg, sent = m.sender === 'harvey';
+    const m = it.msg, sent = m.sender === 'harvey' || m.sender === 'you';
     return '<div class="thread-msg ' + (sent ? 'sent' : 'received') + '"><div class="sender">' +
-      (sent ? 'Harvey' : escHtml(first)) + ' &middot; ' + relTime(m.timestamp) + '</div>' +
+      (m.sender === 'you' ? 'You' : sent ? 'Harvey' : escHtml(first)) + ' &middot; ' + relTime(m.timestamp) + '</div>' +
       escHtml(m.content) + '</div>';
   }).join('');
+  const sending = (c.outgoing || []).map(m =>
+    '<div class="thread-msg sent sending"><div class="sender">' + (m.sender === 'you' ? 'You' : 'Harvey') +
+    ' &middot; sending…</div>' + escHtml(m.content) + '</div>').join('');
+  const canReply = c.id && c.status !== 'awaiting_reply' && c.prospect_status !== 'opted_out';
   const draft = c.draft
-    ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Harvey drafted a reply · waiting for you</div>' +
-      '<div class="td-body">' + escHtml(c.draft.body) + '</div>' +
-      '<button class="btn btn-primary btn-sm" onclick="goTab(\'outbox\')">Review in Outbox' + icon('arrow') + '</button></div>'
-    : '';
+    ? '<div class="thread-draft"><div class="sender">' + icon('pen') + 'Harvey drafted a reply · edit it if you like, then send</div>' +
+      '<textarea class="form-input convo-reply" id="draft-' + escHtml(c.draft.id) + '" aria-label="Reply draft">' +
+        escHtml(c.draft.body) + '</textarea>' +
+      '<div class="convo-reply-actions">' +
+        '<button class="btn btn-primary btn-sm" onclick="sendDraft(' + jsq(c.draft.id) + ',' + jsq(c.draft.subject || '') + ',this)">Approve &amp; send</button>' +
+        '<button class="btn btn-ghost btn-sm" onclick="discardDraft(' + jsq(c.draft.id) + ',this)">Discard</button></div></div>'
+    : canReply
+      ? '<div class="thread-draft convo-compose"><div class="sender">' + icon('pen') + 'Reply to ' + escHtml(first) + '</div>' +
+        '<textarea class="form-input convo-reply" id="reply-' + escHtml(c.id) + '" placeholder="Write your reply…" aria-label="Your reply"></textarea>' +
+        '<div class="convo-reply-actions"><button class="btn btn-primary btn-sm" onclick="sendReply(' + jsq(c.id) + ',this)">Send reply</button></div></div>'
+      : '';
   const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company || 'Unknown';
   const stage = own(STAGE_LABELS, c.stage) ? '<span class="tag">' + STAGE_LABELS[c.stage] + '</span>' : '';
   return '<div class="convo-card"><div class="convo-head">' +
@@ -2579,9 +2715,15 @@ function convoCard(c) {
     '<div><h3>' + escHtml(name) + '</h3><div class="sub">' +
       escHtml([c.company, c.prospect_email].filter(Boolean).join(' · ')) + ' · ' + relTime(c.updated_at) + '</div></div>' +
     // An escalation's intent badge says the same as its status: show one.
-    '<div class="tags">' + (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
+    '<div class="tags">' + (c.id && c.prospect_status !== 'opted_out'
+      ? '<select class="form-input reply-mode" title="How Harvey answers this customer" onchange="setReplyMode(' + jsq(c.id) + ',this.value)">' +
+        '<option value="approve"' + (c.reply_mode !== 'auto' ? ' selected' : '') + '>AI drafts · I approve</option>' +
+        '<option value="auto"' + (c.reply_mode === 'auto' ? ' selected' : '') + '>AI replies automatically</option></select>'
+      : '') +
+      (c.new ? '<span class="tag tag-new">New message</span>' : '') +
+      (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
       stage + badge(c.status) + '</div></div>' +
-    '<div class="thread">' + (thread || '<p class="muted" style="font-size:13px">No messages in this thread yet.</p>') +
+    '<div class="thread">' + ((thread + sending) || '<p class="muted" style="font-size:13px">No messages in this thread yet.</p>') +
     draft + '</div>' + convoActions(c) + '</div>';
 }
 
@@ -2620,6 +2762,166 @@ function convoActions(c) {
   return '';
 }
 
+// ── Replying from the Conversations tab ──
+
+// ── Find leads: plain-language requirement → targeting → search ──
+
+let _leadPoll = null;
+
+// Location chips: pick several places to search.
+let _leadLocations = [];
+
+function renderLocChips() {
+  const el = document.getElementById('lead-loc-chips');
+  if (!el) return;
+  el.innerHTML = _leadLocations.map((l, i) => '<span class="loc-chip">' + escHtml(l) +
+    '<button type="button" aria-label="Remove ' + escHtml(l) + '" onclick="event.stopPropagation(); locRemove(' + i + ')">×</button></span>').join('');
+}
+
+function locAdd(value) {
+  for (const v of String(value || '').split(';').map(s => s.trim()).filter(Boolean)) {
+    if (!_leadLocations.some(l => l.toLowerCase() === v.toLowerCase())) _leadLocations.push(v);
+  }
+  renderLocChips();
+}
+
+function locRemove(i) { _leadLocations.splice(i, 1); renderLocChips(); }
+
+function locKey(e) {
+  const input = e.target;
+  if (e.key === 'Enter' || e.key === ';' || e.key === 'Tab' && input.value.trim()) {
+    e.preventDefault(); locAdd(input.value); input.value = '';
+  } else if (e.key === 'Backspace' && !input.value && _leadLocations.length) {
+    locRemove(_leadLocations.length - 1);
+  }
+}
+
+// Picking a suggestion from the list adds it straight away.
+function locPicked(input) {
+  const opts = [...document.querySelectorAll('#lead-location-list option')].map(o => o.value);
+  if (opts.includes(input.value)) { locAdd(input.value); input.value = ''; }
+}
+
+async function findLeads(btn, run) {
+  const text = document.getElementById('lead-text').value.trim();
+  locAdd(document.getElementById('lead-locations').value);
+  document.getElementById('lead-locations').value = '';
+  const locations = _leadLocations.slice();
+  const autoSend = (document.querySelector('input[name="lead-send"]:checked') || {}).value === 'auto';
+  if (text.length < 5) { showToast('Describe who you want to reach first.', 'error'); return; }
+  if (!locations.length) { showToast('Choose at least one location.', 'error'); return; }
+  if (autoSend && run && !confirm('AI will write AND send cold emails on its own to the leads it finds. Continue?')) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Understanding your request…';
+  const r = await api('/api/leads/request', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text, locations, auto_send: autoSend, run})});
+  btn.disabled = false;
+  btn.textContent = label;
+  if (!r || !r.success) { showToast(failMsg(r, 'Could not save that.'), 'error'); return; }
+  showToast(run ? 'Saved. Searching for ' + r.spec.industries.join(', ') + ' in ' + r.spec.cities.join(', ') + '.'
+                : 'Requirement saved.', 'success');
+  loadLeadRequest();
+}
+
+async function loadLeadRequest() {
+  const el = document.getElementById('lead-status');
+  const d = await api('/api/leads/request');
+  if (!el || !d) return;
+  const req = d.request;
+  if (!req) { el.innerHTML = ''; return; }
+  const s = req.spec || {};
+  const box = document.getElementById('lead-text');
+  if (box && !box.value) box.value = req.text || '';
+  if (!_leadLocations.length) { _leadLocations = (req.locations || s.cities || []).slice(); renderLocChips(); }
+  const radio = document.querySelector('input[name="lead-send"][value="' + (req.auto_send ? 'auto' : 'approve') + '"]');
+  if (radio) radio.checked = true;
+  const rep = d.report || {};
+  const status = d.running
+    ? '<span class="tag">Searching…</span> Finding businesses and reading their websites. This takes a few minutes.'
+    : rep.errors && rep.errors.length
+      ? '<span class="tag">Finished with problems</span> ' + escHtml(rep.errors.join('; '))
+      : '<span class="tag tag-new">Done</span> ' + (rep.new_companies != null ? rep.new_companies + ' new businesses found, ' : '') +
+        (rep.profiled_companies != null ? rep.profiled_companies + ' websites read. ' : '') +
+        'Harvey now finds the person to email at each one (Contacts) on its next cycles.';
+  const row = (k, v) => '<div class="lead-row"><span>' + k + '</span><b>' + escHtml(v || '—') + '</b></div>';
+  el.innerHTML = '<div class="card"><div class="card-head"><h3>What Harvey is looking for</h3></div>' +
+    (s.summary ? '<p class="lede">' + escHtml(s.summary) + '</p>' : '') +
+    row('Businesses', (s.industries || []).join(', ')) + row('Where', (s.cities || []).join(', ')) +
+    row('Person to email', (s.titles || []).join(', ')) + row('Company size', s.company_size) +
+    row('Source', req.provider || 'not searched yet') +
+    row('Cold emails', req.auto_send ? 'AI sends automatically' : 'AI writes, you approve') +
+    '<p class="lead-status">' + (req.provider ? status : 'Saved. Press <b>Save &amp; find leads</b> to start the search.') + '</p>' +
+    '<div class="convo-reply-actions"><button class="btn btn-secondary btn-sm" onclick="goTab(\'companies\')">See companies</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="goTab(\'prospects\')">See contacts</button></div></div>';
+  clearTimeout(_leadPoll);
+  if (d.running && currentTab === 'leads') _leadPoll = setTimeout(loadLeadRequest, 4000);
+}
+
+// ── Per-conversation reply mode (dropdown in the chat header) ──
+
+async function setReplyMode(convoId, mode) {
+  const r = await api('/api/conversations/' + encodeURIComponent(convoId) + '/mode',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode})});
+  if (r && r.success) showToast(mode === 'auto'
+    ? 'AI will reply to this customer on its own.'
+    : 'AI will draft replies here; you approve before they go.', 'success');
+  else showToast(failMsg(r, 'Could not change that.'), 'error');
+  loadConversations();
+}
+
+// New customer messages nobody has answered, or threads handed to you.
+function convoBadge(stats) {
+  const s = stats || {};
+  return Math.max(s.conversations_new || 0, s.needs_human || 0);
+}
+
+// A reply being typed or edited must survive the tab's auto-refresh.
+function replyInProgress() {
+  return [...document.querySelectorAll('.convo-reply')]
+    .some(t => t === document.activeElement || t.value !== t.defaultValue);
+}
+
+const SENDS_SOON = 'Harvey is sending it now (a few seconds, while Harvey is running).';
+
+async function sendDraft(draftId, subject, btn) {
+  const box = document.getElementById('draft-' + draftId);
+  const text = (box && box.value || '').trim();
+  if (!text) { showToast('The reply is empty.', 'error'); return; }
+  btn.disabled = true;
+  const json = {method: 'POST', headers: {'Content-Type': 'application/json'}};
+  if (text !== box.defaultValue.trim()) {
+    const edited = await api('/api/outbox/' + encodeURIComponent(draftId) + '/edit',
+      {...json, body: JSON.stringify({subject: subject, body: text})});
+    if (!edited || !edited.success) { btn.disabled = false; showToast(failMsg(edited, 'Could not save your edit.'), 'error'); return; }
+  }
+  const ok = await api('/api/outbox/' + encodeURIComponent(draftId) + '/approve', {...json, body: '{}'});
+  if (ok && ok.success) showToast('Approved. ' + SENDS_SOON, 'success');
+  else { btn.disabled = false; showToast(failMsg(ok, 'Could not approve that reply.'), 'error'); return; }
+  loadConversations(); loadToday();
+}
+
+async function discardDraft(draftId, btn) {
+  btn.disabled = true;
+  const r = await api('/api/outbox/' + encodeURIComponent(draftId) + '/reject',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+  if (r && r.success) showToast('Draft discarded. Write your own reply below.', 'success');
+  else { btn.disabled = false; showToast(failMsg(r, 'Could not discard that draft.'), 'error'); return; }
+  loadConversations(); loadToday();
+}
+
+async function sendReply(convoId, btn) {
+  const box = document.getElementById('reply-' + convoId);
+  const text = (box && box.value || '').trim();
+  if (!text) { showToast('Write a reply first.', 'error'); return; }
+  btn.disabled = true;
+  const r = await api('/api/conversations/' + encodeURIComponent(convoId) + '/reply',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({body: text})});
+  if (r && r.success) { box.value = ''; showToast('Reply queued. ' + SENDS_SOON, 'success'); }
+  else { btn.disabled = false; showToast(failMsg(r, 'Could not send that reply.'), 'error'); return; }
+  loadConversations(); loadToday();
+}
+
 async function setConvoStatus(id, status) {
   const data = await api('/api/conversations/' + encodeURIComponent(id) + '/status', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2655,6 +2957,7 @@ async function loadActivity() {
 
 // ── Init & live refresh ──
 
+if (!authToken()) showLock('');  // straight to the sign-in page, no flash of an empty dashboard
 loadToday();
 loadTrend();
 loadFunnel();
@@ -2681,7 +2984,13 @@ setInterval(async () => {
   if (!data) return;
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
+  navCount('nav-conversations', convoBadge(data.stats));
 }, 20000);
+
+// The Conversations tab follows new messages and your replies as they land.
+setInterval(() => {
+  if (!document.hidden && !_locked && currentTab === 'conversations' && !replyInProgress()) loadConversations();
+}, 5000);
 
 // Data tabs: auto-refresh live views without clobbering anything in progress.
 // Outbox, settings and help are deliberately excluded — re-rendering the desk
@@ -2693,7 +3002,7 @@ setInterval(() => {
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
-    case 'conversations': loadConversations(); break;
+    case 'conversations': if (!replyInProgress()) loadConversations(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'controls': loadLogs(); break;

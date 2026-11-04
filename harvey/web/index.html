@@ -25,6 +25,7 @@
     <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
     <symbol id="i-usage" viewBox="0 0 24 24"><path d="M5 20v-8M12 20V5M19 20v-5"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/></symbol>
     <symbol id="i-controls" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
     <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 0 1 4.9.7c0 1.7-2.4 2.2-2.4 3.8"/><path d="M12 17h.01"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
@@ -43,18 +44,25 @@
 <!-- Shown whenever the API refuses this tab (no token, a wrong one, or none on the server). -->
 <div id="lock-screen"
      style="display:none;position:fixed;inset:0;z-index:1000;align-items:center;justify-content:center;padding:24px">
-  <div class="card" style="max-width:500px;width:100%">
-    <h2>Dashboard locked</h2>
-    <p class="lede" id="lock-reason" role="alert"></p>
-    <p class="lede">Open the link that <code>harvey dashboard</code> printed in your terminal,
-      or run <code>harvey dashboard --url</code> to print it again. You can also paste the
-      token from <code>data/dashboard-token</code>:</p>
-    <form onsubmit="unlockWithToken(event)" class="form-row">
-      <div class="form-group" style="margin-bottom:0">
-        <label class="form-label" for="lock-token">Dashboard token</label>
-        <input type="password" class="form-input" id="lock-token" autocomplete="off" spellcheck="false">
+  <div class="card auth-card">
+    <div class="auth-brand">Harvey</div>
+    <h2 id="auth-title">Sign in</h2>
+    <p class="lede" id="auth-sub">Welcome back. Sign in to your sales dashboard.</p>
+    <p class="auth-error" id="lock-reason" role="alert"></p>
+    <form id="auth-form" onsubmit="submitAuth(event)">
+      <div class="form-group">
+        <label class="form-label" for="auth-username">Username</label>
+        <input class="form-input" id="auth-username" autocomplete="username" spellcheck="false" required>
       </div>
-      <button class="btn btn-primary" type="submit">Unlock</button>
+      <div class="form-group">
+        <label class="form-label" for="auth-password">Password</label>
+        <input type="password" class="form-input" id="auth-password" autocomplete="current-password" required>
+      </div>
+      <div class="form-group" id="auth-confirm-group" style="display:none">
+        <label class="form-label" for="auth-confirm">Confirm password</label>
+        <input type="password" class="form-input" id="auth-confirm" autocomplete="new-password">
+      </div>
+      <button class="btn btn-primary auth-submit" id="auth-submit" type="submit">Sign in</button>
     </form>
   </div>
 </div>
@@ -69,27 +77,25 @@
 
   <nav aria-label="Sections">
     <div class="nav-group">
-      <div class="nav-label">Work</div>
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
+      <button onclick="showTab('leads', this)"><svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="label">Find leads</span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
+      <button onclick="showTab('prospects', this)"><svg class="icon" aria-hidden="true"><use href="#i-contacts"/></svg><span class="label">Account</span></button>
+      <button onclick="showTab('campaigns', this)"><svg class="icon" aria-hidden="true"><use href="#i-campaigns"/></svg><span class="label">Campaigns</span></button>
+      <button onclick="showTab('integrations', this)"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><span class="label">API Integration</span></button>
+      <button onclick="showTab('settings', this)"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="label">Settings</span></button>
     </div>
-    <div class="nav-group">
-      <div class="nav-label">Pipeline</div>
+    <details class="nav-group nav-more">
+      <summary class="nav-label">More</summary>
+      <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
       <button onclick="showTab('signals', this)"><svg class="icon" aria-hidden="true"><use href="#i-signals"/></svg><span class="label">Signals</span><span class="nav-count" id="nav-signals"></span></button>
       <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button>
-      <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
-      <button onclick="showTab('prospects', this)"><svg class="icon" aria-hidden="true"><use href="#i-contacts"/></svg><span class="label">Contacts</span></button>
-      <button onclick="showTab('campaigns', this)"><svg class="icon" aria-hidden="true"><use href="#i-campaigns"/></svg><span class="label">Campaigns</span></button>
-    </div>
-    <div class="nav-group">
-      <div class="nav-label">System</div>
       <button onclick="showTab('activity', this)"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span class="label">Activity</span></button>
       <button onclick="showTab('usage', this)"><svg class="icon" aria-hidden="true"><use href="#i-usage"/></svg><span class="label">Usage</span></button>
       <button onclick="showTab('controls', this)"><svg class="icon" aria-hidden="true"><use href="#i-controls"/></svg><span class="label">Controls</span></button>
-      <button onclick="showTab('settings', this)"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="label">Settings</span></button>
       <button onclick="showTab('help', this)"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg><span class="label">Help</span></button>
-    </div>
+    </details>
   </nav>
 
   <div class="sidebar-foot">
@@ -98,6 +104,7 @@
       <span id="header-status-text">Checking…</span>
     </div>
     <div class="foot-actions">
+      <button class="icon-btn" onclick="signOut()" title="Sign out of this tab">Sign out</button>
       <button class="icon-btn" id="theme-btn" onclick="cycleTheme()"
               title="Appearance: follows your system until you pick one">auto</button>
       <button class="refresh-btn" onclick="loadCurrentTab()" title="Refresh this page">
@@ -166,6 +173,52 @@
     <div id="cohort-builder"></div>
     <div id="cohort-result"></div>
   </div>
+</div>
+
+<!-- Find leads: describe who you want, Claude turns it into targeting and Harvey searches -->
+<div id="leads" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Find leads</h2>
+      <p>Describe the customers you want in your own words. Harvey works out the targeting,
+         finds matching businesses, reads their websites, then finds the person to email.</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="form-group">
+      <label class="form-label" for="lead-text">1. Who do you want to reach?</label>
+      <textarea class="form-input convo-reply" id="lead-text"
+        placeholder="e.g. Dental clinics with no online booking. I want to reach the owner or practice manager."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="lead-locations">2. Locations (choose one or more)</label>
+      <div class="loc-picker" onclick="document.getElementById('lead-locations').focus()">
+        <span id="lead-loc-chips"></span>
+        <input id="lead-locations" list="lead-location-list" autocomplete="off"
+          placeholder="Type a city and press Enter, or pick from the list"
+          onkeydown="locKey(event)" oninput="locPicked(this)" onblur="locAdd(this.value); this.value=''">
+      </div>
+      <datalist id="lead-location-list">
+        <option value="Delhi, India"><option value="Mumbai, India"><option value="Bangalore, India">
+        <option value="Gurgaon, India"><option value="Noida, India"><option value="Pune, India">
+        <option value="Hyderabad, India"><option value="Chennai, India"><option value="Dubai, UAE">
+        <option value="London, UK"><option value="New York, NY"><option value="Toronto, Canada">
+        <option value="Kolkata, India"><option value="Ahmedabad, India"><option value="Jaipur, India"><option value="Chandigarh, India"><option value="Lucknow, India"><option value="Indore, India"><option value="Kochi, India"><option value="Abu Dhabi, UAE"><option value="Singapore"><option value="Sydney, Australia"><option value="Los Angeles, CA"><option value="Chicago, IL"><option value="Phoenix, AZ"><option value="Houston, TX"><option value="Manchester, UK"><option value="Melbourne, Australia">
+      </datalist>
+    </div>
+    <div class="form-group">
+      <span class="form-label">3. Cold emails</span>
+      <label class="lead-choice"><input type="radio" name="lead-send" value="approve" checked>
+        AI writes them, <b>I approve</b> each one in the Outbox</label>
+      <label class="lead-choice"><input type="radio" name="lead-send" value="auto">
+        AI writes <b>and sends automatically</b> (daily limit and safety checks still apply)</label>
+    </div>
+    <div class="convo-reply-actions">
+      <button class="btn btn-secondary" onclick="findLeads(this, false)">Save</button>
+      <button class="btn btn-primary" onclick="findLeads(this, true)">Save &amp; find leads</button>
+    </div>
+  </div>
+  <div id="lead-status"></div>
 </div>
 
 <!-- Discover: the only stage that spends money -->
@@ -283,6 +336,39 @@
   <div class="stats-grid" id="usage-stats"></div>
   <div class="card" id="usage-daily" style="display:none"></div>
   <div id="usage-tables"></div>
+</div>
+
+<!-- API Integration: discovery sources -->
+<div id="integrations" class="section">
+  <div class="section-head"><div><h2>API Integration</h2><p>The sources Harvey uses to find businesses. Keys are stored locally in <code>.env</code>.</p></div></div>
+
+  <div class="card">
+    <div class="settings-row">
+      <div>
+        <h3>OpenStreetMap <span class="email-tag verified">ready</span></h3>
+        <p class="desc">Free, with no account or key needed. It's a good way to try the whole pipeline, but coverage is thin for service-area trades, because OpenStreetMap maps premises.</p>
+      </div>
+      <div class="fields">
+        <p class="desc">Nothing to set up. Pick it on the <b>Discover</b> page.</p>
+        <button class="btn btn-secondary btn-sm" onclick="showTab('discover', null)">Open Discover</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="settings-row">
+      <div>
+        <h3>TinyFish <span id="tinyfish-status" class="email-tag"></span></h3>
+        <p class="desc">Free web search (30 a minute, 500 an hour). It doesn't give rank signals.</p>
+      </div>
+      <div class="fields">
+        <div class="form-group"><label class="form-label" for="tinyfish-key">TinyFish API key</label>
+          <div class="with-btn"><input type="password" class="form-input" id="tinyfish-key" placeholder="Enter your TinyFish API key" autocomplete="off">
+            <button class="btn btn-secondary" onclick="toggleVisibility('tinyfish-key')">Show</button></div></div>
+        <button class="btn btn-primary btn-sm" onclick="saveTinyfish()">Save TinyFish key</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Settings -->

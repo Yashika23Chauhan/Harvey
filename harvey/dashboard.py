@@ -26,7 +26,7 @@ from fastapi.responses import (
 logger = logging.getLogger("harvey.dashboard")
 
 from harvey import dashboard_auth as auth  # noqa: E402
-from harvey.paths import PROJECT_ROOT  # noqa: E402
+from harvey.paths import PROJECT_ROOT, wake_harvey  # noqa: E402
 from harvey.pidfile import LOCK_FILE, loop_lock_held, pid_alive  # noqa: E402
 from harvey.textio import read_user_text  # noqa: E402
 DB_PATH = PROJECT_ROOT / "data" / "harvey.db"
@@ -52,6 +52,7 @@ def _resolve_config_file() -> Path:
 # route except the static shell needs the token (see dashboard_auth).
 app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 token_store = auth.TokenStore(TOKEN_FILE)
+user_store = auth.UserStore(PROJECT_ROOT / "data" / "dashboard-users.json")
 app.add_middleware(auth.DashboardGuard, store=token_store)
 
 # Harvey process tracking
@@ -390,6 +391,7 @@ async def get_settings():
         "reoon_api_key_set": is_set("REOON_API_KEY"),
         "zerobounce_api_key_set": is_set("ZEROBOUNCE_API_KEY"),
         "hunter_api_key_set": is_set("HUNTER_API_KEY"),
+        "tinyfish_api_key_set": is_set("TINYFISH_API_KEY"),
     }
 
 
@@ -410,7 +412,8 @@ async def save_env_settings(request: Request):
                      "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD",
                      "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
                      "M365_CLIENT_ID", "M365_TENANT_ID",
-                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY"]:
+                     "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
+                     "TINYFISH_API_KEY"]:
             if key in data and data[key] is not None:
                 value = data[key]
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -1154,6 +1157,8 @@ async def outbox_approve_all():
         await state.init_db()
         n = await state.approve_outbox()
         # Held ones (possible planted link or leak) are approved one by one.
+        if n:
+            wake_harvey()
         return {"success": True, "approved": n, "held": await state.count_held_for_review()}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
@@ -1165,6 +1170,8 @@ async def outbox_approve(item_id: str):
         state = _state()
         await state.init_db()
         n = await state.approve_outbox(item_id)
+        if n:
+            wake_harvey()
         return {"success": bool(n)}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
@@ -1600,6 +1607,22 @@ async def get_conversations(awaiting: bool = False):
                          for e in emails.get(row.get("prospect_id"), [])
                          if not camp or e.get("campaign_id") == camp]
         row["draft"] = drafts.get(row["id"])
+    unanswered = await _unanswered_conversation_ids() if rows else set()
+    # Replies on their way out show in the thread at once, marked sending.
+    outgoing: dict[str, list] = {}
+    for o in (await query_db(
+            "SELECT conversation_id, body, created_at, campaign_id FROM outbox "
+            f"WHERE kind = 'reply' AND status IN ('approved', 'sending') AND conversation_id IN ({_in(cids)}) "
+            "ORDER BY created_at", tuple(cids)) if cids else []):
+        outgoing.setdefault(o["conversation_id"], []).append(
+            {"sender": "you" if o["campaign_id"] == "manual-reply" else "harvey",
+             "content": o["body"], "timestamp": o["created_at"]})
+    modes = {m["key"][len("reply_mode:"):]: m["value"] for m in await query_db(
+        "SELECT key, value FROM settings WHERE key LIKE 'reply_mode:%'")}
+    for row in rows:
+        row["new"] = row["id"] in unanswered
+        row["outgoing"] = outgoing.get(row["id"], [])
+        row["reply_mode"] = modes.get(row["id"], "")
     if awaiting:
         rows += await _awaiting_reply()
     return rows
@@ -1665,6 +1688,116 @@ async def set_conversation_status(convo_id: str, request: Request):
     await state.log_action("conversation_status", "dashboard",
                            {"conversation_id": convo_id, "from": rows[0]["status"], "to": status})
     return {"success": True, "status": status}
+
+
+REPLY_MODE_KEY = "reply_mode:"   # + conversation id -> "auto" | "approve"
+
+
+@app.post("/api/conversations/{convo_id}/mode")
+async def set_conversation_reply_mode(convo_id: str, request: Request):
+    """Per conversation: Harvey answers new replies on its own ("auto"), or
+    drafts them for you to approve ("approve"). "" follows Settings."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    mode = (data or {}).get("mode", "") if isinstance(data, dict) else ""
+    if mode not in ("auto", "approve", ""):
+        return JSONResponse({"success": False, "message": "mode must be auto or approve"}, status_code=400)
+    if not await query_db("SELECT id FROM conversations WHERE id = ?", (convo_id,)):
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    state = _state()
+    if mode:
+        await state.set_setting(REPLY_MODE_KEY + convo_id, mode)
+    else:
+        await state.delete_setting(REPLY_MODE_KEY + convo_id)
+    await state.log_action("conversation_reply_mode", "dashboard", {"conversation_id": convo_id, "mode": mode})
+    return {"success": True, "mode": mode}
+
+
+async def _unanswered_conversation_ids() -> set[str]:
+    """Conversations where the customer wrote last and nothing has gone back
+    yet: new messages waiting on you (the Conversations badge)."""
+    rows = await query_db("SELECT id, thread_json, status FROM conversations WHERE status != 'closed'")
+    out = set()
+    for r in rows:
+        try:
+            thread = json.loads(r.get("thread_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if thread and thread[-1].get("sender") == "prospect":
+            out.add(r["id"])
+    if out:
+        answered = await query_db(
+            f"SELECT conversation_id FROM outbox WHERE kind = 'reply' AND status IN ('approved', 'sending') "
+            f"AND conversation_id IN ({','.join('?' * len(out))})", tuple(out))
+        out -= {a["conversation_id"] for a in answered}
+    return out
+
+
+@app.post("/api/conversations/{convo_id}/reply")
+async def reply_to_conversation(convo_id: str, request: Request):
+    """Send your own reply from the Conversations tab.
+
+    It replaces any draft Harvey had waiting, is queued already approved
+    (you wrote it), threads under the last email like Harvey's replies do,
+    and still passes the send gate (do-not-contact, opt-outs, length)."""
+    from harvey.config import load_config
+    from harvey.gate import pre_send_check
+
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    text = str((data or {}).get("body") or "").strip() if isinstance(data, dict) else ""
+    if not text:
+        return JSONResponse({"success": False, "message": "Write a reply first."}, status_code=400)
+    state = _state()
+    await state.init_db()
+    convo = await state.get_conversation(convo_id)
+    if not convo:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    prospect = await state.get_prospect(convo.prospect_id)
+    if not prospect or not prospect.email:
+        return JSONResponse({"success": False, "message": "This contact has no email address."},
+                            status_code=409)
+    if prospect.status == "opted_out":
+        return JSONResponse({"success": False, "message": "They opted out. Harvey won't email them."},
+                            status_code=409)
+    config = load_config()
+    # Thread under the last reply Harvey queued here, else the cold email they answered.
+    meta = await query_db(
+        "SELECT subject, thread_ref, in_reply_to, message_id FROM outbox "
+        "WHERE conversation_id = ? AND kind = 'reply' ORDER BY created_at DESC LIMIT 1", (convo_id,))
+    if not meta:
+        meta = await query_db(
+            "SELECT subject, thread_ref, message_id AS in_reply_to FROM outbox "
+            "WHERE prospect_id = ? AND status = 'sent' ORDER BY sent_at DESC LIMIT 1", (prospect.id,))
+    m = meta[0] if meta else {}
+    subject = m.get("subject") or "your note"
+    if not subject.lower().startswith("re:"):
+        subject = f"Re: {subject}"
+    gate = pre_send_check(prospect.email, subject, text, kind="reply",
+                          do_not_contact=config.compliance.do_not_contact)
+    if not gate.ok:
+        return JSONResponse({"success": False, "message": "Not sent: " + "; ".join(gate.reasons)},
+                            status_code=422)
+    for d in await query_db("SELECT id FROM outbox WHERE conversation_id = ? AND kind = 'reply' "
+                            "AND status = 'pending_review'", (convo_id,)):
+        await state.reject_outbox_item(d["id"])
+    from harvey.agents.sender import MANUAL_REPLY
+    item_id = await state.add_outbox_item(
+        prospect_id=prospect.id, conversation_id=convo_id, kind="reply", campaign_id=MANUAL_REPLY,
+        to_email=prospect.email, subject=subject, body=text,
+        send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        status="approved", provider=config.channels.email.provider,
+        thread_ref=m.get("thread_ref") or "", in_reply_to=m.get("in_reply_to") or "",
+        approved_by="you")
+    await state.update_conversation(convo_id, status="open")
+    wake_harvey()
+    await state.log_action("manual_reply", "dashboard",
+                           {"conversation_id": convo_id, "prospect_email": prospect.email})
+    return {"success": True, "id": item_id}
 
 
 @app.get("/api/trend")
@@ -1847,6 +1980,128 @@ async def start_discovery(request: Request):
         return {"success": True, "queries": len(queries)}
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+LEAD_REQUEST_PROMPT = """You turn a salesperson's plain-language lead request into a search spec
+for finding businesses. Request:
+
+{text}
+
+Return JSON with these keys:
+- "industries": 1-5 short business categories as people search them on a map ("dentist", "plumber", "hvac contractor")
+- "cities": 1-5 places, each as "City, Region/Country" ("Phoenix, AZ", "Delhi, India")
+- "titles": 2-5 job titles of the person to email ("Owner", "Practice Manager")
+- "company_size": e.g. "1-50 employees", or "" if not stated
+- "summary": one sentence restating what you'll look for
+Only use what the request says or clearly implies; never invent a city it doesn't name."""
+
+
+@app.get("/api/leads/request")
+async def get_lead_request():
+    state = _state()
+    await state.init_db()
+    raw = await state.get_setting("lead_request")
+    try:
+        saved = json.loads(raw) if raw else None
+    except ValueError:
+        saved = None
+    return {"request": saved, "running": bool(_discovery_task and not _discovery_task.done()),
+            "report": _discovery_report}
+
+
+@app.post("/api/leads/request")
+async def find_leads(request: Request):
+    """Plain-language requirement -> Claude turns it into targeting (saved to
+    the config Harvey reads) -> discovery and site reading start. Scout then
+    finds the people to email on the heartbeat."""
+    global _discovery_task, _discovery_report, _discovery_kind
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    text = str(data.get("text") or "").strip()
+    if len(text) < 5:
+        return JSONResponse({"success": False, "message": "Describe the leads you want first."},
+                            status_code=400)
+    raw_locs = data.get("locations") or []
+    if isinstance(raw_locs, str):
+        raw_locs = raw_locs.replace(";", "\n").split("\n")
+    locations = [str(x).strip() for x in raw_locs if str(x).strip()][:10]
+    auto_send = bool(data.get("auto_send"))
+    run = data.get("run", True) is not False
+    if not locations:
+        return JSONResponse({"success": False, "message": "Choose at least one location."}, status_code=400)
+    if run and _discovery_task and not _discovery_task.done():
+        return JSONResponse({"success": False, "message": "A search is already running. Wait for it to finish."},
+                            status_code=409)
+    from harvey.brain import Brain
+    from harvey.collectors.discover import DEFAULT_PROVIDER, PROVIDERS
+    from harvey.config import load_config
+    from harvey.pipeline import run_prospecting
+
+    state = _state()
+    await state.init_db()
+    config = load_config()
+    spec = await Brain(state, config.brain).think_json(
+        LEAD_REQUEST_PROMPT.format(text=text[:2000] + "\nLocations: " + "; ".join(locations)),
+        agent="scout", task="lead_request")
+    if not isinstance(spec, dict) or not spec.get("industries"):
+        return JSONResponse({"success": False, "message": "Couldn't understand that. Say what kind of "
+                             "business you want, e.g. 'dental clinics with no online booking'."}, status_code=422)
+    clean = lambda v, n: [str(x).strip() for x in (v or []) if str(x).strip()][:n]
+    spec = {"industries": clean(spec.get("industries"), 5), "cities": locations,
+            "titles": clean(spec.get("titles"), 5) or ["Owner"],
+            "company_size": str(spec.get("company_size") or "").strip(),
+            "summary": str(spec.get("summary") or "").strip()}
+
+    # Save it as the targeting Harvey (and Scout) works from.
+    path = _resolve_config_file()
+    cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    icp = cfg.setdefault("icp", {})
+    icp.update(industries=spec["industries"], geography=spec["cities"], titles=spec["titles"])
+    if spec["company_size"]:
+        icp["company_size"] = spec["company_size"]
+    # Automatic cold email = autopilot: drafts send on their own (daily cap,
+    # verified addresses only, held-for-review checks all still apply).
+    cfg.setdefault("channels", {}).setdefault("email", {})["require_approval"] = not auto_send
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    config = load_config()
+    saved = {"text": text, "locations": locations, "auto_send": auto_send, "spec": spec,
+             "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    if not run:
+        await state.set_setting("lead_request", json.dumps(saved))
+        return {"success": True, "spec": spec, "saved": True}
+
+    provider = str((data or {}).get("provider") or await state.get_setting("discovery_provider")
+                   or DEFAULT_PROVIDER)
+    if provider not in PROVIDERS:
+        provider = DEFAULT_PROVIDER
+    try:
+        queries = _discovery_queries({"provider": provider, "cities": spec["cities"]}, config)
+    except ValueError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    await state.set_setting("lead_request", json.dumps({**saved, "provider": provider}))
+    await state.set_setting("discovery_paused", "")
+
+    async def _go():
+        global _discovery_report
+        try:
+            result = await run_prospecting(state, config, provider, queries, max_spend=1.0)
+            _discovery_report = {**(result.discover or {}),
+                                 "profiled_companies": result.profiled_companies,
+                                 "profile_observations": result.profile_observations,
+                                 "errors": result.errors}
+        except Exception as exc:
+            logger.exception("lead request run failed")
+            _discovery_report = {"errors": [str(exc)], "stopped": "failed"}
+        wake_harvey()  # Scout picks the new companies up for contacts
+
+    _discovery_kind = "discover"
+    _discovery_report = None
+    _discovery_task = asyncio.create_task(_go())
+    return {"success": True, "spec": spec, "provider": provider,
+            "queries": [q.keyword() for q in queries]}
 
 
 @app.post("/api/profile/run")
@@ -2142,6 +2397,7 @@ async def get_today():
             "SELECT COUNT(*) AS n FROM conversations WHERE status = 'needs_human'"
         )
         needs_human = handed[0]["n"] if handed else 0
+        unanswered = await _unanswered_conversation_ids()
         companies = await query_db("SELECT COUNT(*) AS n FROM companies")
         n_companies = companies[0]["n"] if companies else 0
 
@@ -2154,6 +2410,7 @@ async def get_today():
             "outbox_approved": len(approved),
             "open_conversations": open_convos,
             "needs_human": needs_human,
+            "conversations_new": len(unanswered),
             "signals_proposed": len(proposed),
             "email_provider": _current_provider(),
             "unprofiled": unprofiled_count,
@@ -2641,6 +2898,65 @@ async def dashboard():
     return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
+# ── Sign-in page ──
+# The guard lets these through without a token; a correct sign-in returns
+# the dashboard token, which the page keeps for this tab like the link's.
+
+async def _credentials(request: Request) -> tuple[str, str] | None:
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    username, password = body.get("username"), body.get("password")
+    if not isinstance(username, str) or not isinstance(password, str) or len(password) > 1024:
+        return None
+    return username, password
+
+
+@app.get("/auth/status")
+async def auth_status():
+    try:
+        has_users = await asyncio.to_thread(user_store.has_users)
+    except auth.AccountError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=503)
+    return {"has_users": has_users, "signup_open": auth.signup_open() and not has_users}
+
+
+@app.post("/auth/signup")
+async def auth_signup(request: Request):
+    creds = await _credentials(request)
+    if creds is None:
+        return JSONResponse({"success": False, "message": "Invalid request body."}, status_code=400)
+    if not auth.signup_open():
+        return JSONResponse({"success": False, "message": "Sign-up is closed. Ask the owner for an account."},
+                            status_code=403)
+    try:
+        await asyncio.to_thread(user_store.signup, *creds)
+        token = token_store.get()
+    except (auth.AccountError, auth.TokenError) as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    return {"success": True, "token": token, "username": creds[0].strip()}
+
+
+@app.post("/auth/login")
+async def auth_login(request: Request):
+    creds = await _credentials(request)
+    if creds is None:
+        return JSONResponse({"success": False, "message": "Invalid request body."}, status_code=400)
+    try:
+        ok = await asyncio.to_thread(user_store.check, *creds)
+        token = token_store.get() if ok else ""
+    except (auth.AccountError, auth.TokenError) as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=503)
+    if not ok:
+        await asyncio.sleep(1)  # slows guessing
+        return JSONResponse({"success": False, "message": "Wrong username or password."},
+                            status_code=401)
+    return {"success": True, "token": token, "username": creds[0].strip()}
+
+
 class DashboardSetupError(Exception):
     """The dashboard can't start safely; the message says what to do."""
 
@@ -2682,10 +2998,17 @@ def start_dashboard(host: str = "127.0.0.1", port: int = 5555):
     except (DashboardSetupError, auth.TokenError) as e:
         raise DashboardSetupError(str(e)) from e
 
-    print(f"\n  Harvey Dashboard running. Open this link to unlock it:\n\n    {url}\n")
-    print(f"  The token is stored in {token_store.path} (owner-only). Keep the link")
-    print("  private; anyone with it can use the dashboard. Press Ctrl+C to stop.\n")
-    if os.name == "nt":
+    if auth.no_token_mode():
+        print(f"\n  Harvey Dashboard running, NO TOKEN (HARVEY_DASHBOARD_NO_TOKEN=1):\n\n"
+              f"    http://{url.split('://', 1)[1].split('/', 1)[0]}/\n")
+        print("  Any program or user on this computer can use it. Unset the variable")
+        print("  and restart to lock it again. Press Ctrl+C to stop.\n")
+    else:
+        print(f"\n  Harvey Dashboard running. Open http://{url.split('://', 1)[1].split('/', 1)[0]}/")
+        print(f"  and sign in (or create an account), or unlock with this link:\n\n    {url}\n")
+        print(f"  The token is stored in {token_store.path} (owner-only). Keep the link")
+        print("  private; anyone with it can use the dashboard. Press Ctrl+C to stop.\n")
+    if os.name == "nt" and not auth.no_token_mode():
         print("  Windows: the token file is protected by your folder's permissions,")
         print("  not POSIX file modes.\n")
     uvicorn.run(app, host=bind, port=port, log_level="warning",

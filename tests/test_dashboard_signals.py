@@ -448,7 +448,7 @@ vm.runInThisContext("const _cohort = {require: new Set(['A']), exclude: new Set(
     assert data['success'] == {'disabled': False, 'textContent': 'Export CSV'}
     assert data['failure'] == {'disabled': False, 'textContent': 'Export failed — retry'}
     assert data['refused'] == data['failure']
-    assert len(data['locks']) == 1 and 'saved token was not accepted' in data['locks'][0]
+    assert len(data['locks']) == 1 and 'session ended' in data['locks'][0]
 
 
 def test_cohort_csv_invalid_codes_are_client_error(client):

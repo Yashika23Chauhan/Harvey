@@ -1369,13 +1369,18 @@ class StateManager:
                 return (await cursor.fetchone())[0]
 
     async def cancel_pending_outbox_for_prospect(
-        self, prospect_id: str, reason: str = "stop_on_reply"
+        self, prospect_id: str, reason: str = "stop_on_reply", keep_your_replies: bool = False
     ) -> int:
-        """Stop-on-reply: cancel everything queued for a prospect who replied."""
+        """Stop-on-reply: cancel everything queued for a prospect who replied.
+
+        keep_your_replies: a reply you wrote or approved still goes; a new
+        message from them doesn't make your answer obsolete. Opt-outs and
+        bounces leave it False and cancel everything."""
+        keep = " AND NOT (kind = 'reply' AND approved_by = 'you')" if keep_your_replies else ""
         async with self._connect() as db:
             cursor = await db.execute(
                 "UPDATE outbox SET status = 'cancelled', error = ?, updated_at = ? "
-                "WHERE prospect_id = ? AND status IN ('pending_review', 'approved')",
+                "WHERE prospect_id = ? AND status IN ('pending_review', 'approved')" + keep,
                 (reason, _utcnow().isoformat(), prospect_id),
             )
             await db.commit()

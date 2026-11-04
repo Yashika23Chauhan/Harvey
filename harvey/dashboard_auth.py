@@ -236,6 +236,89 @@ class TokenStore:
             return self._token
 
 
+# ── Accounts (sign-in page) ──
+#
+# Signing in hands the browser the same dashboard token the printed link
+# carries, so every API route keeps its one check. Passwords are stored as
+# salted PBKDF2-SHA256 hashes in data/dashboard-users.json, never as text.
+
+USERNAME_RE = re.compile(r"[A-Za-z0-9._@-]{3,64}")
+MIN_PASSWORD = 8
+_PBKDF2_ROUNDS = 310_000
+AUTH_PATHS = {("GET", "/auth/status"), ("POST", "/auth/login"), ("POST", "/auth/signup")}
+
+
+class AccountError(Exception):
+    """A sign-up or sign-in the user can fix; the message says how."""
+
+
+def _hash_password(password: str, salt: bytes) -> str:
+    import hashlib
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ROUNDS).hex()
+
+
+class UserStore:
+    """Dashboard accounts in one JSON file, written atomically."""
+
+    def __init__(self, path: Path):
+        self._lock = threading.Lock()
+        self.path = Path(path)
+
+    def _load(self) -> list[dict]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as e:
+            raise AccountError(f"Can't read {self.path}: {e}") from e
+        users = data.get("users") if isinstance(data, dict) else None
+        return users if isinstance(users, list) else []
+
+    def _save(self, users: list[dict]):
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = self.path.with_name(f".{self.path.name}.{secrets.token_hex(8)}.tmp")
+        tmp.write_text(json.dumps({"users": users}, indent=2), encoding="utf-8")
+        if not _IS_WINDOWS:
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    def has_users(self) -> bool:
+        with self._lock:
+            return bool(self._load())
+
+    def signup(self, username: str, password: str):
+        username = (username or "").strip()
+        if not USERNAME_RE.fullmatch(username):
+            raise AccountError("Username must be 3-64 letters, numbers or . _ @ -")
+        if len(password or "") < MIN_PASSWORD:
+            raise AccountError(f"Password must be at least {MIN_PASSWORD} characters.")
+        with self._lock:
+            users = self._load()
+            # One account per dashboard: sign-up only creates the first one.
+            if users:
+                raise AccountError("This dashboard already has an account. Sign in instead.")
+            salt = secrets.token_bytes(16)
+            users.append({"username": username, "salt": salt.hex(),
+                          "hash": _hash_password(password, salt),
+                          "created_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+            self._save(users)
+
+    def check(self, username: str, password: str) -> bool:
+        with self._lock:
+            users = self._load()
+        user = next((u for u in users
+                     if u.get("username", "").lower() == (username or "").strip().lower()), None)
+        # Hash even for an unknown name, so timing doesn't reveal which names exist.
+        salt = bytes.fromhex(user["salt"]) if user else b"\0" * 16
+        presented = _hash_password(password or "", salt)
+        return bool(user) and hmac.compare_digest(presented, user.get("hash", ""))
+
+
+def signup_open() -> bool:
+    """Sign-up stays open unless HARVEY_DASHBOARD_SIGNUP=closed."""
+    return os.environ.get("HARVEY_DASHBOARD_SIGNUP", "").strip().lower() != "closed"
+
+
 # ── Request checks ──
 
 
@@ -292,6 +375,11 @@ def bearer_ok(header_values: list[str], token: str) -> bool:
         return False
     presented = presented.strip()
     return hmac.compare_digest(presented.encode("utf-8", "replace"), token.encode("ascii"))
+
+
+def no_token_mode() -> bool:
+    """True when the operator turned the token off (HARVEY_DASHBOARD_NO_TOKEN=1)."""
+    return os.environ.get("HARVEY_DASHBOARD_NO_TOKEN", "").strip() == "1"
 
 
 def _is_json(content_type: str) -> bool:
@@ -361,15 +449,26 @@ class DashboardGuard:
         if public:
             return await self.app(scope, receive, send_secured)
 
-        # 3. Token (fail closed when it can't be loaded).
-        try:
-            token = self.store.get()
-        except TokenError as e:
-            return await deny(503, "token_unavailable", str(e))
-        if not bearer_ok(headers.get("authorization", []), token):
-            return await deny(401, "unauthorized",
-                              "Open the link printed by 'harvey dashboard' to unlock.",
-                              extra=[(b"www-authenticate", b'Bearer realm="harvey"')])
+        # Sign-in and sign-up need no token (they hand it out), but still
+        # passed the Host and same-origin checks above and must send JSON.
+        if (method, path) in AUTH_PATHS:
+            if method == "POST" and not _is_json(headers.get("content-type", [""])[0]):
+                return await deny(415, "unsupported_media_type",
+                                  "Request bodies must be application/json.")
+            return await self.app(scope, receive, send_secured)
+
+        # 3. Token (fail closed when it can't be loaded). HARVEY_DASHBOARD_NO_TOKEN=1
+        # skips only this step, for demos on a machine nobody else uses; the
+        # loopback Host and same-origin checks above still apply.
+        if not no_token_mode():
+            try:
+                token = self.store.get()
+            except TokenError as e:
+                return await deny(503, "token_unavailable", str(e))
+            if not bearer_ok(headers.get("authorization", []), token):
+                return await deny(401, "unauthorized",
+                                  "Open the link printed by 'harvey dashboard' to unlock.",
+                                  extra=[(b"www-authenticate", b'Bearer realm="harvey"')])
 
         # 4. Mutations carry JSON or nothing.
         if method in _UNSAFE_METHODS:

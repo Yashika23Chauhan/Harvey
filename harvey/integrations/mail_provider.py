@@ -45,6 +45,7 @@ class InboundMessage:
     date: str = ""
     is_bounce: bool = False
     headers: dict = field(default_factory=dict)
+    to_email: str = ""       # first To address (used for mail you sent yourself)
 
 
 BOUNCE_SENDERS = ("mailer-daemon", "postmaster", "mail delivery subsystem")
@@ -136,6 +137,12 @@ class MailProvider(ABC):
     @abstractmethod
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
         """Fetch recent inbound messages (dedup is the caller's job)."""
+
+    async def get_sent(self, limit: int = 30) -> list[InboundMessage]:
+        """Recent mail you sent from your own mail app (Sent folder), so a
+        reply written outside Harvey shows in its conversation. Providers
+        that can't read it return nothing."""
+        return []
 
     def confirm_read(self) -> None:
         """Every reply the last get_replies returned was handled. A provider
