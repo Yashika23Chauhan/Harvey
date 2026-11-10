@@ -530,7 +530,12 @@ async def get_companies():
     """Companies with contact counts, fit score and register status, best fit first."""
     rows = await query_db("""
         SELECT c.*,
-            (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id) as contact_count
+            (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id) as contact_count,
+            -- Same groups as the Account tab's Contacted / Replied filters.
+            (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id
+                AND p.status IN ('contacted', 'replied', 'interested', 'meeting')) as contacted_count,
+            (SELECT COUNT(*) FROM prospects p WHERE p.company_id = c.id
+                AND p.status IN ('replied', 'interested', 'meeting')) as replied_count
         FROM companies c ORDER BY c.created_at DESC
     """)
     try:
@@ -2005,7 +2010,21 @@ async def get_lead_request():
         saved = json.loads(raw) if raw else None
     except ValueError:
         saved = None
-    return {"request": saved, "running": bool(_discovery_task and not _discovery_task.done()),
+    # What Harvey searches with right now, from the config it reads: the page
+    # shows this, so it never disagrees with a hand-edited config.
+    current = None
+    try:
+        from harvey.config import load_config
+        cfg = load_config()
+        current = {"industries": list(cfg.icp.industries or []),
+                   "cities": list(cfg.icp.geography or []),
+                   "titles": list(cfg.icp.titles or []),
+                   "company_size": cfg.icp.company_size or "",
+                   "auto_send": not cfg.channels.email.require_approval}
+    except Exception as e:
+        logger.warning("Lead request: config unavailable: %s", e)
+    return {"request": saved, "current": current,
+            "running": bool(_discovery_task and not _discovery_task.done()),
             "report": _discovery_report}
 
 
@@ -2077,6 +2096,15 @@ async def find_leads(request: Request):
                    or DEFAULT_PROVIDER)
     if provider not in PROVIDERS:
         provider = DEFAULT_PROVIDER
+    # OpenStreetMap only knows mapped trades (dentists, plumbers...). Agencies
+    # and software firms aren't on the map, so every query would fail: let
+    # Scout's web search find them on the heartbeat instead of reporting an
+    # error for a request Harvey can still answer.
+    if provider == "osm" and not any(PROVIDERS["osm"]._tags(i) for i in spec["industries"]):
+        await state.set_setting("lead_request", json.dumps({**saved, "provider": "web_search"}))
+        _discovery_report = None
+        wake_harvey()
+        return {"success": True, "spec": spec, "provider": "web_search", "queries": []}
     try:
         queries = _discovery_queries({"provider": provider, "cities": spec["cities"]}, config)
     except ValueError as e:

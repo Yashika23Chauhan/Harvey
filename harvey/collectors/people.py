@@ -380,6 +380,9 @@ _STRONG_ROLE = re.compile(
 
 
 def _person(first, last, title, *, source, evidence, url="", owner=False, full_name=""):
+    # schema.org JSON often carries HTML entities ("Founder &amp; CEO", WordPress
+    # SEO plugins especially); every reader builds people here, so decode once.
+    first, last, title, full_name = (html_lib.unescape(x or "") for x in (first, last, title, full_name))
     return {"first_name": first, "last_name": last, "title": title[:80].strip(" ,;:-–—|"),
             "full_name": full_name or f"{first} {last}",
             "owner": owner, "source": source, "evidence": evidence[:200],

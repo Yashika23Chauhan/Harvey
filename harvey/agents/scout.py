@@ -26,6 +26,7 @@ Hardening notes:
 """
 
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -49,6 +50,7 @@ from harvey.integrations.linkedin import LinkedInAutomation
 from harvey.models.company import Company
 from harvey.models.prospect import COMPANY_INBOX_SOURCE, Prospect
 from harvey.public_http import public_http_client
+from harvey.site_country import outside_targets
 from harvey.state import StateManager
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
@@ -498,6 +500,25 @@ class Scout:
             logger.debug(f"DuckDuckGo returned {len(results)} results")
         return results[:MAX_RESULTS_PER_QUERY]
 
+    @staticmethod
+    def _unwrap_bing(href: str) -> str:
+        """Bing wraps results in a bing.com/ck/a click-tracking redirect whose
+        ``u`` parameter is "a1" + the real URL in unpadded base64url. Left
+        wrapped, every result looks like bing.com and is dropped as junk.
+        Anything that doesn't decode to an http(s) URL is returned unchanged."""
+        try:
+            parsed = urlparse(href)
+            if not (parsed.hostname or "").endswith("bing.com") or not parsed.path.startswith("/ck/"):
+                return href
+            u = parse_qs(parsed.query).get("u", [""])[0]
+            if not u.startswith("a1"):
+                return href
+            b64 = u[2:]
+            real = base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)).decode("utf-8")
+            return real if real.startswith(("http://", "https://")) else href
+        except Exception:
+            return href
+
     async def _search_bing(self, query: str) -> list[tuple[str, str]]:
         """Search via Bing HTML scraping — less aggressive than Google."""
         url = f"https://www.bing.com/search?q={quote_plus(query)}&count={MAX_RESULTS_PER_QUERY}"
@@ -515,7 +536,7 @@ class Scout:
             snippet_el = item.select_one(".b_caption p")
             if not (link and link.get("href")):
                 continue
-            href = self._attr_str(link.get("href"))
+            href = self._unwrap_bing(self._attr_str(link.get("href")))
             snippet = snippet_el.get_text().strip() if snippet_el else ""
             if href.startswith("http"):
                 results.append((href, snippet))
@@ -982,6 +1003,8 @@ class Scout:
                 self._seen_domains.add(domain)
 
                 info = await self._scrape_company_info(domain)
+                if self._outside_geography(domain, info):
+                    continue
                 info["domain"] = domain
                 info["source"] = "web_search"
                 info["source_url"] = url
@@ -1030,6 +1053,8 @@ class Scout:
 
                     self._seen_domains.add(domain)
                     info = await self._scrape_company_info(domain)
+                    if self._outside_geography(domain, info):
+                        continue
                     info["domain"] = domain
                     info["source"] = "directory"
                     info["source_url"] = url
@@ -1050,11 +1075,27 @@ class Scout:
                             self._seen_domains.add(pd)
                             continue
                         self._seen_domains.add(pd)
+                        # A list page says nothing about where a firm is:
+                        # read its homepage, as the other paths do.
+                        info = await self._scrape_company_info(pd)
+                        if self._outside_geography(pd, info):
+                            continue
+                        pc = {**info, **pc, "website": info.get("website") or pc.get("website")}
                         companies.append(pc)
                         if len(companies) >= 5:
                             return companies
 
         return companies
+
+    def _outside_geography(self, domain: str, info: dict) -> bool:
+        """True when the homepage places the company outside every country in
+        icp.geography (search results follow wherever Harvey runs, not the
+        ICP). Uses the HTML already fetched; no location shown means kept."""
+        country = outside_targets(domain, info.get("_homepage_html", ""),
+                                  self.config.icp.geography)
+        if country:
+            logger.info(f"Scout: skipped {domain}: based in {country}, outside the target countries.")
+        return bool(country)
 
     def _is_candidate_domain(self, domain: str) -> bool:
         """A domain worth pursuing: real, unseen, not noise."""
@@ -1131,36 +1172,18 @@ class Scout:
 
     def _build_company_search_queries(self) -> list[str]:
         """Build search queries to find ICP-matching companies."""
-        queries = []
-        industries = self.config.icp.industries or [""]
-        geos = self.config.icp.geography or [""]
-        size = self.config.icp.company_size or ""
-
-        for industry in industries[:2]:
-            geo = geos[0] if geos else ""
-
-            parts = []
-            if industry:
-                parts.append(f'"{industry}"')
-            if geo:
-                parts.append(f'"{geo}"')
-            if size:
-                parts.append(f'"{size}"')
-            parts.append("company")
-            queries.append(" ".join(parts))
-
-            if geo and industry:
-                queries.append(f'top "{industry}" companies {geo}')
-
-        # Drop empties / dupes, cap to budget.
-        seen = set()
-        out = []
-        for q in queries:
-            q = q.strip()
-            if q and q != "company" and q not in seen:
-                seen.add(q)
-                out.append(q)
-        return out[:3]
+        # Plain "<industry> <place>", the way a buyer would search: quoted
+        # phrases like "1-50 employees" never appear on a small firm's own
+        # site, so they leave only directories and big SEO publishers. Every
+        # industry x place pair is a candidate and each cycle samples a few,
+        # so later cities get searched too instead of only the first one.
+        industries = [i.strip() for i in (self.config.icp.industries or []) if i and i.strip()] or [""]
+        geos = [g.strip() for g in (self.config.icp.geography or []) if g and g.strip()] or [""]
+        queries = list(dict.fromkeys(
+            f"{industry} {geo}".strip() for industry in industries for geo in geos))
+        queries = [q for q in queries if q]
+        random.shuffle(queries)
+        return queries[:3]
 
     async def _resolve_email(
         self, first_name: str, last_name: str, domain: str

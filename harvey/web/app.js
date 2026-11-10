@@ -2093,21 +2093,70 @@ async function loadCompanies() {
       'OpenStreetMap is free and needs no account.');
     return;
   }
+  if (!document.getElementById('company-rows')) {
+    el.innerHTML = '<div class="toolbar">' +
+      '<label class="search">' + icon('discover') +
+        '<input class="form-input" id="company-search" type="search" placeholder="Search company, website, location" ' +
+        'aria-label="Search companies" oninput="_companyQuery=this.value;renderCompaniesPage(0)"></label>' +
+      '<div class="segmented" id="company-filters" role="group" aria-label="Filter companies"></div>' +
+      '</div><div id="company-rows"></div>';
+    document.getElementById('company-search').value = _companyQuery;
+  }
   renderCompaniesPage(_companiesPage);
 }
 
+// Leads = contacts Harvey found there; Contacted / Replied use the same
+// statuses as the Account tab's filters (counted server-side).
+const COMPANY_FILTERS = [
+  ['all', 'All'],
+  ['leads', 'With leads'],
+  ['contacted', 'Contacted'],
+  ['replied', 'Replied'],
+  ['none', 'No leads'],
+];
+let _companyFilter = 'all';
+let _companyQuery = '';
+
+function companyMatches(c, f) {
+  const leads = c.contact_count || 0;
+  if (f === 'leads') return leads > 0;
+  if (f === 'none') return leads === 0;
+  if (f === 'contacted') return (c.contacted_count || 0) > 0;
+  if (f === 'replied') return (c.replied_count || 0) > 0;
+  return true;
+}
+
+function setCompanyFilter(f) { _companyFilter = f; renderCompaniesPage(0); }
+
 function renderCompaniesPage(page) {
-  const el = document.getElementById('companies-list');
-  const data = _companies;
+  const el = document.getElementById('company-rows');
+  const filtersEl = document.getElementById('company-filters');
+  if (!el) return;
+  const q = _companyQuery.trim().toLowerCase();
+  const found = c => !q || [c.name, c.domain, c.location, c.industry].join(' ').toLowerCase().includes(q);
+  filtersEl.innerHTML = COMPANY_FILTERS.map(f =>
+    '<button class="' + (f[0] === _companyFilter ? 'on' : '') + '" aria-pressed="' + (f[0] === _companyFilter) +
+      '" onclick="setCompanyFilter(\'' + f[0] + '\')">' + f[1] + ' <span class="n">' +
+      _companies.filter(c => companyMatches(c, f[0]) && found(c)).length + '</span></button>'
+  ).join('');
+
+  // Keep each company's index into _companies: showCompanyContacts uses it.
+  const data = _companies.map((c, i) => [c, i]).filter(([c]) => companyMatches(c, _companyFilter) && found(c));
+  if (!data.length) {
+    el.innerHTML = '<div class="table-card">' + emptyState(icon('companies'), 'No matches',
+      'No company matches that search and filter.') + '</div>';
+    return;
+  }
   const pages = Math.max(1, Math.ceil(data.length / COMPANIES_PER_PAGE));
   _companiesPage = Math.min(Math.max(0, page), pages - 1);
   const start = _companiesPage * COMPANIES_PER_PAGE;
   let html = '<div class="table-card"><table class="nowrap"><thead><tr><th>Company</th>' +
     '<th title="Company fit, 0-100: sector, decision maker, reachability, buying signal. Hover a score for why.">Fit</th>' +
     '<th title="Hover a status for why the company was or wasn\'t contacted">Status</th>' +
-    '<th>Industry</th><th>Location</th><th class="num">Contacts</th><th>Added</th></tr></thead><tbody>';
-  data.slice(start, start + COMPANIES_PER_PAGE).forEach((c, j) => {
-    const i = start + j;
+    '<th>Industry</th><th>Location</th><th class="num" title="Contacts Harvey found at this company">Leads</th>' +
+    '<th class="num" title="Leads who replied (including interested and meeting booked)">Replied</th><th>Added</th></tr></thead><tbody>';
+  data.slice(start, start + COMPANIES_PER_PAGE).forEach(([c, i]) => {
+    const replied = c.replied_count || 0;
     const website = c.website || (c.domain ? 'https://' + c.domain : '');
     const domain = safeHref(website)
       ? '<a href="' + safeHref(website) + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">' +
@@ -2122,6 +2171,7 @@ function renderCompaniesPage(page) {
       '<td>' + (c.industry ? '<span class="tag">' + escHtml(c.industry) + '</span>' : '') + '</td>' +
       '<td>' + escHtml(c.location) + '</td>' +
       '<td class="num">' + (c.contact_count || 0) + '</td>' +
+      '<td class="num">' + (replied ? '<span class="badge t-good">' + replied + ' replied</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td class="muted">' + relTime(c.created_at) + '</td></tr>';
   });
   const pager = pages > 1
@@ -2819,8 +2869,10 @@ async function findLeads(btn, run) {
   btn.disabled = false;
   btn.textContent = label;
   if (!r || !r.success) { showToast(failMsg(r, 'Could not save that.'), 'error'); return; }
-  showToast(run ? 'Saved. Searching for ' + r.spec.industries.join(', ') + ' in ' + r.spec.cities.join(', ') + '.'
-                : 'Requirement saved.', 'success');
+  showToast(!run ? 'Requirement saved.'
+    : r.provider === 'web_search'
+      ? 'Saved. Harvey will search the web for ' + r.spec.industries.join(', ') + ' in ' + r.spec.cities.join(', ') + ' on its next cycle.'
+      : 'Saved. Searching for ' + r.spec.industries.join(', ') + ' in ' + r.spec.cities.join(', ') + '.', 'success');
   loadLeadRequest();
 }
 
@@ -2828,16 +2880,27 @@ async function loadLeadRequest() {
   const el = document.getElementById('lead-status');
   const d = await api('/api/leads/request');
   if (!el || !d) return;
-  const req = d.request;
-  if (!req) { el.innerHTML = ''; return; }
-  const s = req.spec || {};
+  // The live targeting from Harvey's config wins over the saved request: it
+  // is what Scout actually searches with, even after a hand edit.
+  const req = d.request || {};
+  const cur = d.current;
+  if (!d.request && !cur) { el.innerHTML = ''; return; }
+  const saved = req.spec || {};
+  const s = cur || saved;
+  const sameAsSaved = JSON.stringify(s.industries || []) === JSON.stringify(saved.industries || []) &&
+    JSON.stringify(s.cities || []) === JSON.stringify(saved.cities || []);
+  const autoSend = cur ? cur.auto_send : req.auto_send;
   const box = document.getElementById('lead-text');
   if (box && !box.value) box.value = req.text || '';
-  if (!_leadLocations.length) { _leadLocations = (req.locations || s.cities || []).slice(); renderLocChips(); }
-  const radio = document.querySelector('input[name="lead-send"][value="' + (req.auto_send ? 'auto' : 'approve') + '"]');
+  if (!_leadLocations.length) { _leadLocations = (s.cities || req.locations || []).slice(); renderLocChips(); }
+  const radio = document.querySelector('input[name="lead-send"][value="' + (autoSend ? 'auto' : 'approve') + '"]');
   if (radio) radio.checked = true;
   const rep = d.report || {};
-  const status = d.running
+  const sourceLabel = req.provider === 'web_search' ? 'Web search (Harvey finds them each cycle)' : req.provider;
+  const status = req.provider === 'web_search'
+    ? '<span class="tag">Web search</span> These businesses aren\'t on the free map, so Harvey searches the web for them ' +
+      'every cycle while it\'s running, keeps only ones based in your locations\' countries, then finds the person to email.'
+    : d.running
     ? '<span class="tag">Searching…</span> Finding businesses and reading their websites. This takes a few minutes.'
     : rep.errors && rep.errors.length
       ? '<span class="tag">Finished with problems</span> ' + escHtml(rep.errors.join('; '))
@@ -2846,12 +2909,12 @@ async function loadLeadRequest() {
         'Harvey now finds the person to email at each one (Contacts) on its next cycles.';
   const row = (k, v) => '<div class="lead-row"><span>' + k + '</span><b>' + escHtml(v || '—') + '</b></div>';
   el.innerHTML = '<div class="card"><div class="card-head"><h3>What Harvey is looking for</h3></div>' +
-    (s.summary ? '<p class="lede">' + escHtml(s.summary) + '</p>' : '') +
+    (saved.summary && sameAsSaved ? '<p class="lede">' + escHtml(saved.summary) + '</p>' : '') +
     row('Businesses', (s.industries || []).join(', ')) + row('Where', (s.cities || []).join(', ')) +
     row('Person to email', (s.titles || []).join(', ')) + row('Company size', s.company_size) +
-    row('Source', req.provider || 'not searched yet') +
-    row('Cold emails', req.auto_send ? 'AI sends automatically' : 'AI writes, you approve') +
-    '<p class="lead-status">' + (req.provider ? status : 'Saved. Press <b>Save &amp; find leads</b> to start the search.') + '</p>' +
+    row('Source', sourceLabel || 'not searched yet') +
+    row('Cold emails', autoSend ? 'AI sends automatically' : 'AI writes, you approve') +
+    '<p class="lead-status">' + (req.provider ? status : 'Press <b>Save &amp; find leads</b> to start the search.') + '</p>' +
     '<div class="convo-reply-actions"><button class="btn btn-secondary btn-sm" onclick="goTab(\'companies\')">See companies</button>' +
     '<button class="btn btn-secondary btn-sm" onclick="goTab(\'prospects\')">See contacts</button></div></div>';
   clearTimeout(_leadPoll);
