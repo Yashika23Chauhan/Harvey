@@ -3981,3 +3981,68 @@ setInterval(() => {
     case 'leads': if (_leadsPane === 'controls') loadLogs(); break;
   }
 }, 15000);
+
+// ── Brand name ──
+//
+// HARVEY_BRAND_NAME in .env shows another name instead of "Harvey" on every
+// page (title, sidebar, sign-in card and all text), for a company running
+// Harvey under its own product name. Commands and file names (in <code>) are
+// left alone. Without it nothing changes.
+
+const BRAND_SKIP = new Set(['SCRIPT', 'STYLE', 'CODE', 'PRE', 'TEXTAREA', 'INPUT', 'SELECT', 'OPTION', 'KBD']);
+let _brand = '';
+
+function brandText(s) {
+  return _brand && s && s.indexOf('Harvey') !== -1 ? s.replace(/\bHarvey\b/g, _brand) : s;
+}
+
+function applyBrand(root) {
+  if (!_brand || !root) return;
+  if (root.nodeType === Node.TEXT_NODE) {
+    const p = root.parentNode;
+    if (p && !BRAND_SKIP.has(p.nodeName) && !(p.closest && p.closest('code, pre, [contenteditable]'))) {
+      const next = brandText(root.nodeValue);
+      if (next !== root.nodeValue) root.nodeValue = next;
+    }
+    return;
+  }
+  if (root.nodeType !== Node.ELEMENT_NODE || BRAND_SKIP.has(root.nodeName)) return;
+  for (const attr of ['title', 'placeholder', 'aria-label', 'alt']) {
+    const v = root.getAttribute && root.getAttribute(attr);
+    if (v && v.indexOf('Harvey') !== -1) root.setAttribute(attr, brandText(v));
+  }
+  if (root.closest && root.closest('code, pre, [contenteditable]')) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  let n = walker.nextNode();
+  while (n) {
+    if (n.nodeType === Node.TEXT_NODE) applyBrand(n);
+    else if (n.getAttribute) {
+      for (const attr of ['title', 'placeholder', 'aria-label', 'alt']) {
+        const v = n.getAttribute(attr);
+        if (v && v.indexOf('Harvey') !== -1) n.setAttribute(attr, brandText(v));
+      }
+    }
+    n = walker.nextNode();
+  }
+}
+
+async function loadBrand() {
+  try {
+    const r = await authFetch('/auth/status');
+    const s = await r.json();
+    const name = String((s && s.brand) || '').trim();
+    if (!name || name === 'Harvey') return;
+    _brand = name;
+  } catch { return; }
+  document.title = brandText(document.title);
+  applyBrand(document.body);
+  // Pages render their text later (tabs, tables, toasts): brand those too.
+  new MutationObserver(muts => {
+    for (const m of muts) {
+      if (m.type === 'characterData') applyBrand(m.target);
+      else m.addedNodes.forEach(applyBrand);
+    }
+  }).observe(document.body, {childList: true, subtree: true, characterData: true});
+}
+
+loadBrand();

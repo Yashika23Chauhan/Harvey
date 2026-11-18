@@ -3665,7 +3665,21 @@ async def auth_status():
         has_users = await asyncio.to_thread(user_store.has_users)
     except auth.AccountError as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=503)
-    return {"has_users": has_users, "signup_open": auth.signup_open() and not has_users}
+    return {"has_users": has_users, "signup_open": auth.signup_open() and not has_users,
+            "brand": _brand_name()}
+
+
+def _brand_name() -> str:
+    """The name the dashboard shows instead of "Harvey" (HARVEY_BRAND_NAME in
+    .env, e.g. a company's own product name); "" keeps "Harvey". Read from
+    the .env on disk so a change shows on the next page load."""
+    try:
+        name = (_read_env_file().get("HARVEY_BRAND_NAME") or "").strip()
+    except Exception:
+        name = ""
+    name = name or os.getenv("HARVEY_BRAND_NAME", "").strip()
+    # Plain text only, short enough for the sidebar
+    return "".join(ch for ch in name if ch.isprintable() and ch not in "<>\"'`")[:40]
 
 
 @app.post("/auth/signup")
