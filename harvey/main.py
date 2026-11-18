@@ -19,6 +19,7 @@ from harvey.integrations.mail_provider import NATIVE_PROVIDERS
 from harvey.pidfile import (
     LOCK_FILE, hold_loop_lock, read_pid, release_loop_lock, remove_pid_file, write_pid_file,
 )
+from harvey.collectors.sitewatch import reports_required, run_sitewatch_stage
 from harvey.pipeline import run_profile_stage
 from harvey.state import StateManager
 
@@ -414,7 +415,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 action = "quiet_hours_send"
             else:
                 logger.info("Checking pipeline state...")
-                summary = await state.get_state_summary()
+                summary = await state.get_state_summary(
+                    require_report=await reports_required(state, config, env))
                 action = await decide_next_action(brain, state, config, summary=summary)
 
             # 5. Execute — run independent agents in parallel where possible
@@ -456,6 +458,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # turns a name and a domain into something worth writing about.
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
+
+            # SiteWatch scans ride along too (no model call): ask for scans of
+            # companies about to be written to, read back finished ones.
+            if config.sitewatch.enabled:
+                tasks.append(("sitewatch", run_sitewatch_stage(state, config, env)))
 
             outcomes = await _run_agents(tasks)
 

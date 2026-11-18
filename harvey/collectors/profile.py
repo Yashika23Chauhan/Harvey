@@ -22,6 +22,7 @@ import httpx
 from harvey.public_http import public_http_client
 from harvey.startups import funding_text
 
+from harvey.collectors import site_audit
 from harvey.collectors.ats import detect_board, matching_roles, read_board, role_keywords
 
 from harvey.collectors.discover import (
@@ -1128,6 +1129,24 @@ class ProfileCollector:
 
         # Booking gap
         add("NO_ONLINE_BOOKING", num=0 if self._any(home, BOOKING_HINTS) else 1)
+
+        # Website problems a web studio can fix, from the page already read.
+        # Each is recorded both ways (1 found / 0 not), so a fixed problem
+        # stops being current on the next read.
+        add("NO_HTTPS", num=1 if site_audit.is_insecure(site) else 0)
+        add("NOT_MOBILE_FRIENDLY", num=1 if site_audit.lacks_mobile_viewport(home) else 0)
+        add("NO_META_DESCRIPTION", num=1 if site_audit.lacks_meta_description(home) else 0)
+        if self.wants("OUTDATED_COPYRIGHT"):
+            year = site_audit.outdated_copyright(home)
+            add("OUTDATED_COPYRIGHT", num=year or 0, text=f"© {year}" if year else "")
+        if self.wants("OLD_WORDPRESS"):
+            old = site_audit.old_wordpress(home)
+            add("OLD_WORDPRESS", num=1 if old else 0, text=f"WordPress {old}" if old else "")
+        if self.wants("MOBILE_SPEED_SCORE"):
+            score = await site_audit.mobile_pagespeed(site)
+            if score is not None:  # no score (rate limit, timeout) is not a score of 0
+                add("MOBILE_SPEED_SCORE", num=score,
+                    url=f"https://pagespeed.web.dev/analysis?url={site}")
 
         # The About page, fetched once for the startup signals below.
         about_page: list[tuple[str, str]] = []

@@ -580,6 +580,79 @@ def cmd_profile(args):
     asyncio.run(_profile())
 
 
+def cmd_sitewatch(args):
+    """Website scans through your SiteWatch: status, test the connection, or scan one site."""
+    from harvey.config import load_config, load_env
+    from harvey.integrations.sitewatch import SiteWatchClient, SiteWatchError
+
+    config, env = load_config(), load_env()
+    action = args.sitewatch_action
+    if not (env.sitewatch_url and env.sitewatch_api_token):
+        print("\n  SiteWatch isn't configured: set SITEWATCH_URL and SITEWATCH_API_TOKEN in .env\n"
+              "  (the token is SITEWATCH_API_TOKEN in SiteWatch's own .env).\n")
+        return
+    client = SiteWatchClient(env.sitewatch_url, env.sitewatch_api_token)
+
+    async def _status():
+        from harvey.collectors.sitewatch import sitewatch_codes
+        from harvey.state import StateManager
+        state = StateManager()
+        await state.init_db()
+        codes = await sitewatch_codes(state)
+        pending = await state.pending_sitewatch_scans(limit=1000)
+        print(f"\n  SiteWatch: {env.sitewatch_url}")
+        print(f"  Scans before writing: {'on' if config.sitewatch.enabled else 'off (sitewatch.enabled in harvey.yaml)'}")
+        print(f"  Signals confirmed: {', '.join(sorted(codes)) or 'none (harvey signals --confirm SITEWATCH_ISSUES,SITEWATCH_STATUS,SITEWATCH_UI_ISSUES,SITEWATCH_SEO_ISSUES)'}")
+        print(f"  Scans waiting for a result: {len(pending)}\n")
+
+    async def _test():
+        try:
+            client_name = await client.ping()
+        except SiteWatchError as e:
+            print(f"\n  Not connected: {e}\n")
+            return
+        print(f"\n  Connected to SiteWatch. Prospect sites are filed under \"{client_name}\".\n")
+
+    async def _scan():
+        if not args.target:
+            print("\n  Usage: harvey sitewatch scan <domain or URL>\n")
+            return
+        try:
+            started = await client.request_scan(args.target)
+            print(f"\n  Scan {started.scan_id} {started.state}. Waiting up to {args.wait} minute(s)...")
+            deadline = asyncio.get_running_loop().time() + args.wait * 60
+            result = await client.get_scan(started.scan_id)
+            while not result.done and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(10)
+                result = await client.get_scan(started.scan_id)
+        except SiteWatchError as e:
+            print(f"\n  {e}\n")
+            return
+        if not result.done:
+            print("  Still running. SiteWatch needs a queue worker (php artisan queue:work) or its cron URL.\n")
+            return
+        print(f"\n  {result.state}: {result.status or '-'} (risk {result.score}/100)")
+        for f in result.issues("low"):
+            print(f"   [{f['severity']}] {f['title']} ({f['where']})\n      {f['plain']}")
+        if not result.findings:
+            print("   No problems found.")
+        if result.report_url:
+            print(f"\n  Report: {result.report_url}")
+        for report, label in ((result.ui, "Responsive & UI"), (result.seo, "SEO")):
+            if report is None:
+                continue
+            print(f"\n  {label} report: {report.grade or '-'} ({report.score}/100, higher is better)")
+            for f in report.issues("low"):
+                print(f"   [{f['severity']}] {f['title']} ({f['where']})")
+            if not report.findings:
+                print("   Nothing to fix.")
+            if report.report_url:
+                print(f"  {label} report: {report.report_url}")
+        print()
+
+    asyncio.run({"status": _status, "test": _test, "scan": _scan}[action]())
+
+
 def cmd_discover(args):
     """Find businesses. The only stage that spends money, so it estimates first."""
     from harvey.state import StateManager
@@ -1142,6 +1215,16 @@ def main():
                      help="connect a key, 'other' if you use another warmup service, "
                           "or show the status (default)")
     sub.set_defaults(func=cmd_trulyinbox)
+
+    sub = subparsers.add_parser(
+        "sitewatch", help="Website scans through your SiteWatch before writing")
+    sub.add_argument("sitewatch_action", nargs="?", default="status",
+                     choices=["status", "test", "scan"],
+                     help="show the status (default), test the connection, or scan one site")
+    sub.add_argument("target", nargs="?", default="", help="Domain or URL to scan")
+    sub.add_argument("--wait", type=int, default=10,
+                     help="Minutes to wait for the scan to finish (default: 10)")
+    sub.set_defaults(func=cmd_sitewatch)
 
     # harvey usage
     sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")

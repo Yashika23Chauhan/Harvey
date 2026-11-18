@@ -50,7 +50,7 @@ from harvey.integrations.linkedin import LinkedInAutomation
 from harvey.models.company import Company
 from harvey.models.prospect import COMPANY_INBOX_SOURCE, Prospect
 from harvey.public_http import public_http_client
-from harvey.site_country import outside_targets
+from harvey.site_country import outside_targets, site_location
 from harvey.state import StateManager
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
@@ -153,6 +153,14 @@ class Scout:
         self._site_evidence: dict[str, dict] = {}
         self._own_domains: dict[str, bool] = {}
         self._challenged: set[str] = set()
+
+    async def _add_lead(self, prospect):
+        """Save a lead. With leads.require_approval on, a new one waits as
+        'pending' on the Leads page until you approve it."""
+        leads = getattr(self.config, "leads", None)
+        if getattr(leads, "require_approval", False) is True:
+            prospect.lead_approval = "pending"
+        return await self.state.add_prospect(prospect)
 
     async def run(self):
         """Main prospecting flow: find leads matching ICP."""
@@ -659,7 +667,7 @@ class Scout:
                 if await self._is_duplicate_prospect(prospect):
                     continue
 
-                await self.state.add_prospect(prospect)
+                await self._add_lead(prospect)
                 self._remember_prospect(prospect)
                 count += 1
                 logger.info(
@@ -723,7 +731,7 @@ class Scout:
                 logger.debug(f"mark_prospects_checked failed for {domain}: {e}")
 
             for prospect in contacts:
-                await self.state.add_prospect(prospect)
+                await self._add_lead(prospect)
                 count += 1
                 logger.info(
                     f"Scout: Added {prospect.full_name()} ({prospect.title}) "
@@ -814,7 +822,7 @@ class Scout:
                         if await self._is_duplicate_prospect(prospect):
                             continue
 
-                        await self.state.add_prospect(prospect)
+                        await self._add_lead(prospect)
                         self._remember_prospect(prospect)
                         count += 1
                         logger.info(
@@ -878,7 +886,7 @@ class Scout:
                 if await self._is_duplicate_prospect(prospect):
                     continue
 
-                await self.state.add_prospect(prospect)
+                await self._add_lead(prospect)
                 self._remember_prospect(prospect)
                 count += 1
 
@@ -937,6 +945,7 @@ class Scout:
                 website=company.get("website", f"https://{domain}"),
                 description=company.get("description", ""),
                 industry=company.get("industry", default_industry),
+                location=company.get("location", ""),
                 source=company.get("source", "web_search"),
                 source_url=company.get("source_url", ""),
             )
@@ -971,7 +980,7 @@ class Scout:
 
         count = 0
         for prospect in scored_contacts:
-            await self.state.add_prospect(prospect)
+            await self._add_lead(prospect)
             count += 1
             logger.info(
                 f"Scout: Added {prospect.full_name()} ({prospect.title}) "
@@ -1005,6 +1014,9 @@ class Scout:
                 info = await self._scrape_company_info(domain)
                 if self._outside_geography(domain, info):
                     continue
+                info["location"] = site_location(
+                    domain, info.get("_homepage_html", ""),
+                    getattr(self, "_query_places", {}).get(query, ""))
                 info["domain"] = domain
                 info["source"] = "web_search"
                 info["source_url"] = url
@@ -1055,6 +1067,7 @@ class Scout:
                     info = await self._scrape_company_info(domain)
                     if self._outside_geography(domain, info):
                         continue
+                    info["location"] = site_location(domain, info.get("_homepage_html", ""))
                     info["domain"] = domain
                     info["source"] = "directory"
                     info["source_url"] = url
@@ -1080,6 +1093,7 @@ class Scout:
                         info = await self._scrape_company_info(pd)
                         if self._outside_geography(pd, info):
                             continue
+                        info["location"] = site_location(pd, info.get("_homepage_html", ""))
                         pc = {**info, **pc, "website": info.get("website") or pc.get("website")}
                         companies.append(pc)
                         if len(companies) >= 5:
@@ -1179,9 +1193,15 @@ class Scout:
         # so later cities get searched too instead of only the first one.
         industries = [i.strip() for i in (self.config.icp.industries or []) if i and i.strip()] or [""]
         geos = [g.strip() for g in (self.config.icp.geography or []) if g and g.strip()] or [""]
-        queries = list(dict.fromkeys(
-            f"{industry} {geo}".strip() for industry in industries for geo in geos))
-        queries = [q for q in queries if q]
+        places = {}
+        for industry in industries:
+            for geo in geos:
+                q = f"{industry} {geo}".strip()
+                if q:
+                    places.setdefault(q, geo)
+        # Which place each query searched, for the company's location.
+        self._query_places = places
+        queries = list(places)
         random.shuffle(queries)
         return queries[:3]
 
@@ -1942,7 +1962,7 @@ Respond ONLY with the JSON array."""
         scored = await self._score_contacts(all_contacts)
         count = 0
         for prospect in scored:
-            await self.state.add_prospect(prospect)
+            await self._add_lead(prospect)
             count += 1
             logger.info(
                 f"Scout: Added {prospect.full_name()} ({prospect.title}) "

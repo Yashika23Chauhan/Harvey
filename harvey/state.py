@@ -519,7 +519,43 @@ MIGRATIONS: list[str] = [
     -- knows about the recipient. Empty until then.
     ALTER TABLE prospects ADD COLUMN timezone TEXT DEFAULT '';
     """,
+    # ── v15: website scans requested from SiteWatch ──
+    """
+    -- One row per company: its latest SiteWatch scan. A scan is queued on
+    -- SiteWatch's side and finishes minutes later, so the id is kept here
+    -- until a later cycle reads the result into observations.
+    -- state: 'pending' (asked, not finished), 'done', 'failed'.
+    CREATE TABLE IF NOT EXISTS sitewatch_scans (
+        company_id TEXT PRIMARY KEY REFERENCES companies(id),
+        scan_id INTEGER,
+        state TEXT DEFAULT 'pending',
+        error TEXT DEFAULT '',
+        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        finished_at TIMESTAMP
+    );
+    """,
+    # ── v16: lead approval before writing ──
+    """
+    -- pending: found, waiting for you; approved: Harvey may write; rejected:
+    -- never contacted. Leads already past 'new' were contacted before this
+    -- existed, so they count as approved; ones still waiting need a yes.
+    ALTER TABLE prospects ADD COLUMN lead_approval TEXT DEFAULT 'approved';
+    UPDATE prospects SET lead_approval = 'pending' WHERE status = 'new';
+    CREATE INDEX IF NOT EXISTS idx_prospects_lead_approval ON prospects(lead_approval);
+    """,
 ]
+
+LEAD_APPROVALS = ("pending", "approved", "rejected")
+
+# A prospect row aliased ``p`` whose website report is ready: no company or
+# no website (nothing to scan), a finished scan ('done'), or you chose to
+# write without one ('skipped'). A pending or failed scan holds the email.
+_REPORT_READY = """(
+    COALESCE(p.company_id, '') = ''
+    OR COALESCE((SELECT c.domain FROM companies c WHERE c.id = p.company_id), '') = ''
+    OR EXISTS (SELECT 1 FROM sitewatch_scans s
+               WHERE s.company_id = p.company_id AND s.state IN ('done', 'skipped'))
+)"""
 
 BRAIN_PROVIDERS = ("claude", "codex")
 _USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
@@ -769,8 +805,8 @@ class StateManager:
                     email_status, phone, phone_verified, linkedin_url, title,
                     seniority, department, source, source_url, status, score,
                     personalization_notes, company, industry, company_size,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    created_at, updated_at, lead_approval)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     prospect.id, prospect.company_id,
                     prospect.first_name, prospect.last_name,
@@ -785,6 +821,7 @@ class StateManager:
                     prospect.company, prospect.industry, prospect.company_size,
                     prospect.created_at.isoformat(),
                     prospect.updated_at.isoformat(),
+                    prospect.lead_approval if prospect.lead_approval in LEAD_APPROVALS else "pending",
                 ),
             )
             await db.commit()
@@ -1983,6 +2020,106 @@ class StateManager:
             )
             await db.commit()
 
+    # ── Lead approval ──
+
+    async def set_lead_approval(self, prospect_ids: list[str], approval: str) -> int:
+        """Approve, reject or reset leads. Returns how many changed."""
+        if approval not in LEAD_APPROVALS:
+            raise ValueError(f"approval must be one of {', '.join(LEAD_APPROVALS)}")
+        ids = [str(i) for i in prospect_ids if i][:1000]
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"UPDATE prospects SET lead_approval = ?, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE id IN ({marks}) AND COALESCE(lead_approval, '') != ?",
+                (approval, *ids, approval),
+            )
+            await db.commit()
+            return cursor.rowcount
+
+    # ── SiteWatch website scans ──
+
+    async def companies_needing_sitewatch(self, limit: int = 25, rescan_days: int = 30) -> list[dict]:
+        """Companies with a website and an approved lead still to write to,
+        never scanned or last scanned over ``rescan_days`` ago. A pending
+        scan is never asked for twice."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT c.id, c.name, c.domain, c.website
+                   FROM companies c
+                   LEFT JOIN sitewatch_scans s ON s.company_id = c.id
+                   WHERE c.domain != ''
+                     AND EXISTS (SELECT 1 FROM prospects p
+                                 WHERE p.company_id = c.id AND p.status = 'new'
+                                   AND COALESCE(p.lead_approval, 'approved') = 'approved')
+                     AND (s.company_id IS NULL
+                          OR (s.state != 'pending'
+                              AND COALESCE(s.finished_at, s.requested_at) < datetime('now', ?)))
+                   ORDER BY s.company_id IS NOT NULL, c.created_at
+                   LIMIT ?""",
+                (f"-{int(rescan_days)} days", int(limit)),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def set_sitewatch_scan(self, company_id: str, scan_id: int | None,
+                                 state: str = "pending", error: str = "") -> None:
+        """Record a scan just asked for (or that couldn't be asked for: state
+        'failed'), replacing the company's previous one."""
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT INTO sitewatch_scans (company_id, scan_id, state, error, requested_at, finished_at)
+                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP,
+                           CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END)
+                   ON CONFLICT(company_id) DO UPDATE SET
+                       scan_id = excluded.scan_id, state = excluded.state, error = excluded.error,
+                       requested_at = excluded.requested_at, finished_at = excluded.finished_at""",
+                (company_id, scan_id, state, error[:500], state),
+            )
+            await db.commit()
+
+    async def pending_sitewatch_scans(self, limit: int = 50) -> list[dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM sitewatch_scans WHERE state = 'pending' AND scan_id IS NOT NULL "
+                "ORDER BY requested_at LIMIT ?", (int(limit),),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def finish_sitewatch_scan(self, company_id: str, state: str, error: str = "") -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE sitewatch_scans SET state = ?, error = ?, finished_at = CURRENT_TIMESTAMP "
+                "WHERE company_id = ?", (state, error[:500], company_id),
+            )
+            await db.commit()
+
+    async def sitewatch_waiting(self, company_id: str, max_wait_minutes: int = 60) -> bool:
+        """Should the writer hold off on this company for its website scan?
+        Yes while it has never been asked for (the scan stage asks this
+        cycle or next), and while one is pending for under
+        ``max_wait_minutes``. A failed or slow scan never holds email up
+        for longer."""
+        if not company_id:
+            return False
+        async with self._connect() as db:
+            async with db.execute(
+                """SELECT c.domain, s.state, s.requested_at >= datetime('now', ?)
+                   FROM companies c LEFT JOIN sitewatch_scans s ON s.company_id = c.id
+                   WHERE c.id = ?""",
+                (f"-{int(max_wait_minutes)} minutes", company_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row or not row[0]:
+            return False
+        domain, scan_state, recent = row
+        if scan_state is None:
+            return True
+        return scan_state == "pending" and bool(recent)
+
     # ── Run log (what ran, when, what it produced and cost) ──
 
     async def start_run(
@@ -2136,17 +2273,42 @@ class StateManager:
                         return True
         return False
 
-    async def count_writable_prospects(self) -> int:
-        """New prospects the Writer can draft for (a deliverable email)."""
+    async def count_writable_prospects(self, require_report: bool = False) -> int:
+        """New prospects the Writer can draft for (a deliverable email, an
+        approved lead and, with ``require_report``, a finished website
+        report)."""
         marks = ",".join("?" for _ in WRITABLE_EMAIL_STATUSES)
         async with self._connect() as db:
             async with db.execute(
                 f"""SELECT COUNT(*) FROM prospects p
                     WHERE status = 'new' AND email != ''
-                      AND email_status IN ({marks}) AND NOT {_company_answered('p')}""",
+                      AND COALESCE(lead_approval, 'approved') = 'approved'
+                      AND email_status IN ({marks}) AND NOT {_company_answered('p')}
+                      {('AND ' + _REPORT_READY) if require_report else ''}""",
                 WRITABLE_EMAIL_STATUSES,
             ) as cursor:
                 return (await cursor.fetchone())[0]
+
+    async def sitewatch_report_ready(self, company_id: str) -> bool:
+        """Has this company's website a finished SiteWatch report (or you
+        chose to write without one)? A lead with no company or no website
+        has nothing to scan, so it is ready."""
+        async with self._connect() as db:
+            async with db.execute(
+                f"SELECT {_REPORT_READY} FROM (SELECT ? AS company_id) p", (company_id or "",),
+            ) as cursor:
+                return bool((await cursor.fetchone())[0])
+
+    async def sitewatch_reset(self, company_ids: list[str]) -> int:
+        """Forget companies' scans so the next sync asks SiteWatch again."""
+        ids = [c for c in company_ids if c]
+        if not ids:
+            return 0
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"DELETE FROM sitewatch_scans WHERE company_id IN ({','.join('?' for _ in ids)})", ids)
+            await db.commit()
+            return cursor.rowcount
 
     async def count_recent_unusable_prospects(self, hours: int = 24) -> int:
         """New prospects found in the last ``hours`` that the Writer can't use."""
@@ -2601,7 +2763,7 @@ class StateManager:
 
     # ── Summary for Decision Making ──
 
-    async def get_state_summary(self) -> dict:
+    async def get_state_summary(self, require_report: bool = False) -> dict:
         prospect_counts = await self.count_prospects_by_status()
         today = date.today().isoformat()
         async with self._connect() as db:
@@ -2634,7 +2796,7 @@ class StateManager:
             # The 'new' prospects the Writer can act on. A guessed or invalid
             # address stays 'new' forever, so deciding from the raw count
             # would keep choosing write_campaign with nothing to write.
-            "writable_prospects": await self.count_writable_prospects(),
+            "writable_prospects": await self.count_writable_prospects(require_report),
             # Unusable ones found in the last day: the heartbeat pauses
             # prospecting for the day when these alone fill the backlog.
             "recent_unusable_prospects": await self.count_recent_unusable_prospects(),

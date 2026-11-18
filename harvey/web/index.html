@@ -37,6 +37,7 @@
     <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.5 2.5M15.2 15.2l2.5 2.5M6.3 17.7l2.5-2.5M15.2 8.8l2.5-2.5"/></symbol>
     <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/><path d="m9 12 2 2 4-4"/></symbol>
     <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></symbol>
   </defs>
 </svg>
@@ -78,23 +79,26 @@
   <nav aria-label="Sections">
     <div class="nav-group">
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
-      <button onclick="showTab('leads', this)"><svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="label">Find leads</span></button>
-      <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
+      <button onclick="showTab('leads', this)"><svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="label">Lead settings</span></button>
+      <!-- <button onclick="showTab('integrations', this)"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><span class="label">API Integration</span></button> -->
+      <button onclick="showTab('found', this)"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span class="label">Leads</span><span class="nav-count" id="nav-found"></span></button>
+      <!-- <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button> -->
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
       <button onclick="showTab('prospects', this)"><svg class="icon" aria-hidden="true"><use href="#i-contacts"/></svg><span class="label">Account</span></button>
       <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
+      <button onclick="showTab('templates', this)"><svg class="icon" aria-hidden="true"><use href="#i-pen"/></svg><span class="label">Email template</span></button>
       <button onclick="showTab('campaigns', this)"><svg class="icon" aria-hidden="true"><use href="#i-campaigns"/></svg><span class="label">Campaigns</span></button>
-      <button onclick="showTab('integrations', this)"><svg class="icon" aria-hidden="true"><use href="#i-plug"/></svg><span class="label">API Integration</span></button>
-      <button onclick="showTab('settings', this)"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="label">Settings</span></button>
+      <button onclick="showTab('sitewatch', this)"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg><span class="label">SiteWatch</span><span class="nav-count" id="nav-sitewatch"></span></button>
+      <!-- <button onclick="showTab('settings', this)"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="label">Settings</span></button> -->
     </div>
     <details class="nav-group nav-more">
       <summary class="nav-label">More</summary>
-      <button onclick="showTab('signals', this)"><svg class="icon" aria-hidden="true"><use href="#i-signals"/></svg><span class="label">Signals</span><span class="nav-count" id="nav-signals"></span></button>
-      <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button>
+      <!-- <button onclick="showTab('signals', this)"><svg class="icon" aria-hidden="true"><use href="#i-signals"/></svg><span class="label">Signals</span><span class="nav-count" id="nav-signals"></span></button> -->
+      <!-- <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button> -->
       <button onclick="showTab('activity', this)"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span class="label">Activity</span></button>
-      <button onclick="showTab('usage', this)"><svg class="icon" aria-hidden="true"><use href="#i-usage"/></svg><span class="label">Usage</span></button>
-      <button onclick="showTab('controls', this)"><svg class="icon" aria-hidden="true"><use href="#i-controls"/></svg><span class="label">Controls</span></button>
-      <button onclick="showTab('help', this)"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg><span class="label">Help</span></button>
+      <!-- <button onclick="showTab('usage', this)"><svg class="icon" aria-hidden="true"><use href="#i-usage"/></svg><span class="label">Usage</span></button> -->
+      <!-- <button onclick="showTab('controls', this)"><svg class="icon" aria-hidden="true"><use href="#i-controls"/></svg><span class="label">Controls</span></button> -->
+      <!-- <button onclick="showTab('help', this)"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg><span class="label">Help</span></button> -->
     </details>
   </nav>
 
@@ -179,11 +183,18 @@
 <div id="leads" class="section">
   <div class="section-head">
     <div>
-      <h2>Find leads</h2>
+      <h2>Lead settings</h2>
       <p>Describe the customers you want in your own words. Harvey works out the targeting,
          finds matching businesses, reads their websites, then finds the person to email.</p>
     </div>
   </div>
+  <div class="segmented leads-tabs" role="tablist" aria-label="Lead settings">
+    <button id="leads-tab-find" class="on" role="tab" onclick="setLeadsPane('find')">Find leads</button>
+    <button id="leads-tab-settings" role="tab" onclick="setLeadsPane('settings')">Settings</button>
+    <button id="leads-tab-integrations" role="tab" onclick="setLeadsPane('integrations')">API Integration</button>
+    <button id="leads-tab-controls" role="tab" onclick="setLeadsPane('controls')">Controls</button>
+  </div>
+  <div id="leads-pane-find">
   <div class="card">
     <div class="form-group">
       <label class="form-label" for="lead-text">1. Who do you want to reach?</label>
@@ -219,128 +230,9 @@
     </div>
   </div>
   <div id="lead-status"></div>
-</div>
-
-<!-- Discover: the only stage that spends money -->
-<div id="discover" class="section">
-  <div class="section-head">
-    <div>
-      <h2>Discover</h2>
-      <p>Find businesses matching your ICP. Pick a source, see what it will cost,
-         then run it &mdash; nothing is called until you press the button.</p>
-    </div>
   </div>
-  <div id="discover-profile"></div>
-
-  <div class="subhead">Source</div>
-  <div id="discover-providers"></div>
-
-  <div class="subhead">Run</div>
-  <div class="card">
-    <div class="form-row" style="margin-bottom:4px">
-      <div class="form-group">
-        <label class="form-label" for="disc-preset">Look for</label>
-        <select class="form-input" id="disc-preset" title="Startup and hiring searches, run by web search (TinyFish, Serper or DataForSEO SERP). YC startups and Accelerator startups: companies whose own site says Y Combinator or another accelerator (Techstars, Antler, Entrepreneur First and others) backed them; turn on YC_BACKED or ACCELERATOR to tag them. Recently funded: companies announcing their own raise in the last 18 months; turn on FUNDING_ROUND to record the round, amount and date. Hiring for your roles: companies whose own careers pages list one of your hiring_signals roles (or ICP titles); turn on HIRING_ROLE and profiling reads the job board their site links to.">
-          <option value="">Your ICP's industries</option>
-          <option value="yc">YC startups</option>
-          <option value="accelerator">Accelerator startups</option>
-          <option value="funding">Recently funded</option>
-          <option value="hiring">Companies hiring for your roles</option>
-        </select>
-      </div>
-      <div class="form-group" style="flex:2">
-        <label class="form-label" for="disc-cities">Cities</label>
-        <input class="form-input" id="disc-cities" placeholder="From your ICP, or override: Denver, CO; Boulder, CO">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="disc-limit">Results per query</label>
-        <input class="form-input" id="disc-limit" type="number" value="100" min="1" max="1000">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="disc-depth">Search depth</label>
-        <input class="form-input" id="disc-depth" type="number" value="30" min="10" max="100" step="10">
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="disc-cap">Spend cap ($)</label>
-        <input class="form-input" id="disc-cap" type="number" value="1.00" min="0" step="0.25">
-      </div>
-    </div>
-    <div id="discover-estimate"></div>
-    <div class="btn-group">
-      <button class="btn btn-secondary" onclick="estimateDiscovery()">Estimate cost</button>
-      <button class="btn btn-primary" id="disc-run" onclick="runDiscovery()" disabled>
-        Estimate first</button>
-      <button class="btn btn-danger" id="disc-stop" onclick="stopDiscovery()" style="display:none">
-        Stop</button>
-    </div>
-  </div>
-  <div id="discover-result"></div>
-</div>
-
-<!-- Companies -->
-<div id="companies" class="section">
-  <div class="section-head"><div><h2>Companies</h2><p>Organizations Harvey has researched, best fit first: which have leads, which you've emailed and which replied. Click a row to see its contacts.</p></div>
-    <div><button class="btn btn-secondary btn-sm" onclick="downloadCsv('/api/export/companies.csv', 'company-register.csv', this)"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export register</button></div></div>
-  <div id="companies-list"></div>
-</div>
-
-<!-- Contacts -->
-<div id="prospects" class="section">
-  <div class="section-head">
-    <div><h2>Contacts</h2><p>People Harvey has found, how sure it is of their address, and where each one stands.</p></div>
-    <div class="page-actions">
-      <button class="btn btn-secondary btn-sm" onclick="downloadCsv('/api/export/prospects.csv', 'prospects.csv', this)"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export deliverable</button>
-      <button class="btn btn-ghost btn-sm" onclick="downloadCsv('/api/export/prospects.csv?all=true', 'prospects-all.csv', this)">Export all</button>
-    </div>
-  </div>
-  <div id="prospects-table"></div>
-</div>
-
-<!-- Campaigns -->
-<div id="campaigns" class="section">
-  <div class="section-head"><div><h2>Campaigns</h2><p>Email sequences Harvey has written, and how far each one has got.</p></div></div>
-  <div id="campaigns-list"></div>
-</div>
-
-<!-- Outbox: the decisions desk -->
-<div id="outbox" class="section">
-  <div class="section-head">
-    <div>
-      <h2>Outbox</h2>
-      <p>Emails waiting for you. Read one, decide, move on &mdash;
-         <kbd>A</kbd> approve, <kbd>R</kbd> reject, <kbd>E</kbd> edit, <kbd>J</kbd>/<kbd>K</kbd> to move.</p>
-    </div>
-    <div class="page-actions" id="outbox-actions"></div>
-  </div>
-  <div id="outbox-banner"></div>
-  <div id="outbox-desk"></div>
-  <div id="outbox-list"></div>
-</div>
-
-<!-- Conversations -->
-<div id="conversations" class="section">
-  <div class="section-head"><div><h2>Conversations</h2><p>Every reply, and how Harvey handled it.</p></div></div>
-  <div id="conversations-list"></div>
-</div>
-
-<!-- Activity -->
-<div id="activity" class="section">
-  <div class="section-head"><div><h2>Activity</h2><p>A running log of every action Harvey's agents have taken.</p></div></div>
-  <div id="activity-list"></div>
-</div>
-
-<!-- Usage -->
-<div id="usage" class="section">
-  <div class="section-head"><div><h2>Usage</h2><p>Model usage on your subscription (Claude or Codex): calls and tokens by provider, agent and task. Subscription plans aren't billed per token, so there are no dollar costs here.</p></div></div>
-  <div id="usage-quota" class="card" style="display:none"></div>
-  <div class="stats-grid" id="usage-stats"></div>
-  <div class="card" id="usage-daily" style="display:none"></div>
-  <div id="usage-tables"></div>
-</div>
-
-<!-- API Integration: discovery sources -->
-<div id="integrations" class="section">
-  <div class="section-head"><div><h2>API Integration</h2><p>The sources Harvey uses to find businesses. Keys are stored locally in <code>.env</code>.</p></div></div>
+  <div id="leads-pane-integrations" hidden>
+  <p class="lede">The sources Harvey uses to find businesses. Keys are stored locally in <code>.env</code>.</p>
 
   <div class="card">
     <div class="settings-row">
@@ -369,11 +261,30 @@
       </div>
     </div>
   </div>
-</div>
-
-<!-- Settings -->
-<div id="settings" class="section">
-  <div class="section-head"><div><h2>Settings</h2><p>Credentials are stored locally in <code>.env</code> and never sent anywhere except the services themselves.</p></div></div>
+  </div>
+  <div id="leads-pane-controls" hidden>
+  <p class="lede">Start and stop Harvey's heartbeat loop, and watch what it's doing.</p>
+  <div class="control-panel">
+    <div class="card">
+      <h2>Agent</h2>
+      <div class="status-big" id="control-status">
+        <div class="dot stopped" id="control-dot"></div>
+        <span class="label stopped" id="control-label">Stopped</span>
+      </div>
+      <div class="status-meta" id="control-meta"></div>
+      <div class="btn-group">
+        <button class="btn btn-primary" id="btn-start" onclick="startHarvey()">Start Harvey</button>
+        <button class="btn btn-danger" id="btn-stop" onclick="stopHarvey()" style="display:none">Stop Harvey</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Recent logs <button class="btn btn-ghost btn-sm" onclick="loadLogs()" style="margin-left:auto"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button></h2>
+      <div class="log-viewer" id="log-viewer">No logs yet. Start Harvey to see activity.</div>
+    </div>
+  </div>
+  </div>
+  <div id="leads-pane-settings" hidden>
+  <p class="lede">Credentials are stored locally in <code>.env</code> and never sent anywhere except the services themselves.</p>
 
   <div class="subhead">Sending</div>
   <div id="sending-mode-card"></div>
@@ -518,30 +429,310 @@
       </div>
     </div>
   </div>
+  </div>
 </div>
 
-<!-- Controls -->
-<div id="controls" class="section">
-  <div class="section-head"><div><h2>Controls</h2><p>Start and stop Harvey's heartbeat loop, and watch what it's doing.</p></div></div>
-  <div class="control-panel">
-    <div class="card">
-      <h2>Agent</h2>
-      <div class="status-big" id="control-status">
-        <div class="dot stopped" id="control-dot"></div>
-        <span class="label stopped" id="control-label">Stopped</span>
+<!-- Leads: what Harvey found, approved before it writes -->
+<div id="found" class="section">
+  <div class="section-head">
+    <div><h2>Leads</h2><p>Every lead Harvey found. Approve the ones worth emailing: Harvey only writes to approved leads, and never contacts rejected ones.</p></div>
+    <button class="btn btn-secondary btn-sm" onclick="loadFoundLeads()"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button>
+  </div>
+  <div class="toolbar">
+    <div class="segmented" id="found-tabs" role="group" aria-label="Approval"></div>
+    <div class="search"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg>
+      <input class="form-input" id="found-search" placeholder="Search company, name or email" oninput="_foundQuery=this.value; foundFiltersChanged()"></div>
+    <select class="form-input found-select" id="found-type" aria-label="Business type" onchange="_foundType=this.value; foundFiltersChanged()"></select>
+    <select class="form-input found-select" id="found-sort" aria-label="Sort" onchange="_foundSort=this.value; foundFiltersChanged()">
+      <option value="type">Sort: business type</option>
+      <option value="newest">Sort: newest first</option>
+      <option value="company">Sort: company A–Z</option>
+    </select>
+  </div>
+  <div class="found-bulk" id="found-bulk" hidden>
+    <span id="found-selected"></span>
+    <button class="btn btn-primary btn-sm" onclick="setFoundApproval(_foundSelectedIds(), 'approved')">Approve selected</button>
+    <button class="btn btn-secondary btn-sm" onclick="setFoundApproval(_foundSelectedIds(), 'rejected')">Reject selected</button>
+    <button class="btn btn-primary btn-sm" id="found-create-btn" onclick="createCampaign(_foundSelectedIds())">Create campaign</button>
+    <button class="btn btn-ghost btn-sm" onclick="_foundSelected.clear(); renderFoundLeads()">Clear</button>
+  </div>
+  <div id="found-list"></div>
+</div>
+
+<!-- Discover: the only stage that spends money -->
+<div id="discover" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Discover</h2>
+      <p>Find businesses matching your ICP. Pick a source, see what it will cost,
+         then run it &mdash; nothing is called until you press the button.</p>
+    </div>
+  </div>
+  <div id="discover-profile"></div>
+
+  <div class="subhead">Source</div>
+  <div id="discover-providers"></div>
+
+  <div class="subhead">Run</div>
+  <div class="card">
+    <div class="form-row" style="margin-bottom:4px">
+      <div class="form-group">
+        <label class="form-label" for="disc-preset">Look for</label>
+        <select class="form-input" id="disc-preset" title="Startup and hiring searches, run by web search (TinyFish, Serper or DataForSEO SERP). YC startups and Accelerator startups: companies whose own site says Y Combinator or another accelerator (Techstars, Antler, Entrepreneur First and others) backed them; turn on YC_BACKED or ACCELERATOR to tag them. Recently funded: companies announcing their own raise in the last 18 months; turn on FUNDING_ROUND to record the round, amount and date. Hiring for your roles: companies whose own careers pages list one of your hiring_signals roles (or ICP titles); turn on HIRING_ROLE and profiling reads the job board their site links to.">
+          <option value="">Your ICP's industries</option>
+          <option value="yc">YC startups</option>
+          <option value="accelerator">Accelerator startups</option>
+          <option value="funding">Recently funded</option>
+          <option value="hiring">Companies hiring for your roles</option>
+        </select>
       </div>
-      <div class="status-meta" id="control-meta"></div>
-      <div class="btn-group">
-        <button class="btn btn-primary" id="btn-start" onclick="startHarvey()">Start Harvey</button>
-        <button class="btn btn-danger" id="btn-stop" onclick="stopHarvey()" style="display:none">Stop Harvey</button>
+      <div class="form-group" style="flex:2">
+        <label class="form-label" for="disc-cities">Cities</label>
+        <input class="form-input" id="disc-cities" placeholder="From your ICP, or override: Denver, CO; Boulder, CO">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="disc-limit">Results per query</label>
+        <input class="form-input" id="disc-limit" type="number" value="100" min="1" max="1000">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="disc-depth">Search depth</label>
+        <input class="form-input" id="disc-depth" type="number" value="30" min="10" max="100" step="10">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="disc-cap">Spend cap ($)</label>
+        <input class="form-input" id="disc-cap" type="number" value="1.00" min="0" step="0.25">
       </div>
     </div>
-    <div class="card">
-      <h2>Recent logs <button class="btn btn-ghost btn-sm" onclick="loadLogs()" style="margin-left:auto"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button></h2>
-      <div class="log-viewer" id="log-viewer">No logs yet. Start Harvey to see activity.</div>
+    <div id="discover-estimate"></div>
+    <div class="btn-group">
+      <button class="btn btn-secondary" onclick="estimateDiscovery()">Estimate cost</button>
+      <button class="btn btn-primary" id="disc-run" onclick="runDiscovery()" disabled>
+        Estimate first</button>
+      <button class="btn btn-danger" id="disc-stop" onclick="stopDiscovery()" style="display:none">
+        Stop</button>
+    </div>
+  </div>
+  <div id="discover-result"></div>
+</div>
+
+<!-- Companies -->
+<div id="companies" class="section">
+  <div class="section-head"><div><h2>Companies</h2><p>Organizations Harvey has researched, best fit first: which have leads, which you've emailed and which replied. Click a row to see its contacts.</p></div>
+    <div><button class="btn btn-secondary btn-sm" onclick="downloadCsv('/api/export/companies.csv', 'company-register.csv', this)"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export register</button></div></div>
+  <div id="companies-list"></div>
+</div>
+
+<!-- Contacts -->
+<div id="prospects" class="section">
+  <div class="section-head">
+    <div><h2>Contacts</h2><p>People Harvey has found, how sure it is of their address, and where each one stands.</p></div>
+    <div class="page-actions">
+      <button class="btn btn-secondary btn-sm" onclick="downloadCsv('/api/export/prospects.csv', 'prospects.csv', this)"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>Export deliverable</button>
+      <button class="btn btn-ghost btn-sm" onclick="downloadCsv('/api/export/prospects.csv?all=true', 'prospects-all.csv', this)">Export all</button>
+    </div>
+  </div>
+  <div id="prospects-table"></div>
+</div>
+
+<!-- Campaigns -->
+<div id="campaigns" class="section">
+  <div class="section-head"><div><h2>Campaigns</h2><p>Email sequences Harvey has written, and how far each one has got.</p></div></div>
+  <div id="campaigns-list"></div>
+</div>
+
+<!-- Outbox: the decisions desk -->
+<div id="outbox" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Outbox</h2>
+      <p>Emails waiting for you. Read one, decide, move on &mdash;
+         <kbd>A</kbd> approve, <kbd>R</kbd> reject, <kbd>E</kbd> edit, <kbd>J</kbd>/<kbd>K</kbd> to move.</p>
+    </div>
+    <div class="page-actions" id="outbox-actions"></div>
+  </div>
+  <div id="outbox-banner"></div>
+  <div id="outbox-desk"></div>
+  <div id="outbox-list"></div>
+</div>
+
+<!-- Conversations -->
+<div id="conversations" class="section">
+  <div class="section-head"><div><h2>Conversations</h2><p>Every reply, and how Harvey handled it.</p></div></div>
+  <div id="conversations-list"></div>
+</div>
+
+<!-- Activity -->
+<div id="activity" class="section">
+  <div class="section-head"><div><h2>Activity</h2><p>Everything Harvey and you have done: leads found, emails written and sent, replies, and anything that went wrong.</p></div>
+    <button class="btn btn-secondary btn-sm" onclick="loadActivity()"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button></div>
+  <div class="kpis" id="activity-kpis"></div>
+  <div class="toolbar">
+    <div class="segmented" id="activity-filters" role="group" aria-label="Show"></div>
+    <div class="search"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg>
+      <input class="form-input" id="activity-search" placeholder="Search a contact, campaign or action" oninput="_activityQuery=this.value; renderActivity()"></div>
+    <label class="activity-toggle"><input type="checkbox" id="activity-checkins" onchange="_activityCheckins=this.checked; loadActivity()"> Show Harvey's check-ins</label>
+  </div>
+  <div id="activity-list"></div>
+</div>
+
+<!-- Usage -->
+<div id="usage" class="section">
+  <div class="section-head"><div><h2>Usage</h2><p>Model usage on your subscription (Claude or Codex): calls and tokens by provider, agent and task. Subscription plans aren't billed per token, so there are no dollar costs here.</p></div></div>
+  <div id="usage-quota" class="card" style="display:none"></div>
+  <div class="stats-grid" id="usage-stats"></div>
+  <div class="card" id="usage-daily" style="display:none"></div>
+  <div id="usage-tables"></div>
+</div>
+
+<!-- Email templates: the one email Harvey writes to each agency -->
+<div id="templates" class="section">
+  <div class="section-head">
+    <div><h2>Email template</h2>
+      <p>The one email Harvey sends to each agency. Write it once; Harvey fills in the name and agency for every lead, then adds your opt-out line and postal address when it sends.</p></div>
+    <div class="tpl-status" id="tpl-meta"></div>
+  </div>
+
+  <div class="card flush tpl-shell">
+    <div class="tpl-toolbar">
+      <div class="tpl-mode">
+        <span class="tpl-label">Writing</span>
+        <div class="segmented" role="radiogroup" aria-label="How Harvey uses your text" id="tpl-mode">
+          <button type="button" role="radio" data-mode="exact" onclick="tplSetMode('exact')">Exactly as written</button>
+          <button type="button" role="radio" data-mode="adapt" onclick="tplSetMode('adapt')">AI adapts it slightly</button>
+        </div>
+        <span class="muted tpl-mode-hint" id="tpl-mode-hint"></span>
+      </div>
+    </div>
+
+    <div class="tpl-split">
+      <!-- Left: the editor -->
+      <div class="tpl-pane">
+        <div class="tpl-field">
+          <label class="tpl-label" for="tpl-subject-0">Subject</label>
+          <input class="form-input" id="tpl-subject-0" maxlength="120"
+                 placeholder="Leave empty and AI writes a short one"
+                 onfocus="tplFocus[0]='subject'" oninput="tplEdited()">
+        </div>
+        <div class="tpl-field">
+          <div class="tpl-field-head">
+            <label class="tpl-label" for="tpl-body-0">Message</label>
+            <span class="muted" id="tpl-words"></span>
+          </div>
+          <textarea class="form-input tpl-body" id="tpl-body-0" maxlength="3000" spellcheck="true"
+                    onfocus="tplFocus[0]='body'" oninput="tplEdited()"></textarea>
+        </div>
+        <div class="tpl-chips" id="tpl-chips" aria-label="Insert a placeholder"></div>
+      </div>
+
+      <!-- Right: how it lands in an inbox -->
+      <div class="tpl-pane tpl-pane-preview">
+        <div class="tpl-preview-head">
+          <span class="tpl-label" id="tpl-preview-title">Preview</span>
+          <span class="tpl-badge" id="tpl-preview-badge">Example lead</span>
+        </div>
+        <div class="tpl-mail" id="tpl-mail"></div>
+        <div class="tpl-ai">
+          <select class="form-input" id="tpl-lead" aria-label="Lead to write for"></select>
+          <button class="btn btn-secondary btn-sm" id="tpl-ai-btn" onclick="previewTemplate(this)">
+            <svg class="icon" aria-hidden="true"><use href="#i-sparkle"/></svg>Write with AI</button>
+          <button class="btn btn-ghost btn-sm" id="tpl-ai-reset" onclick="tplShowSample()" hidden>Back to example</button>
+        </div>
+        <p class="muted tpl-ai-note">Write with AI drafts this email for a real lead. Nothing is saved or sent.</p>
+      </div>
+    </div>
+
+    <div class="tpl-foot">
+      <span class="muted" id="tpl-dirty"></span>
+      <button class="btn btn-ghost btn-sm" onclick="loadTemplate(true)">Undo changes</button>
+      <button class="btn btn-primary btn-sm" id="tpl-save" onclick="saveTemplate(this)">Save template</button>
+    </div>
+  </div>
+
+  <p class="tpl-notice" id="tpl-notice" hidden></p>
+
+  <details class="card tpl-advanced">
+    <summary><b>Advanced: edit the full rules</b> <span class="muted">· the instructions Claude reads, generated from your email</span></summary>
+    <p class="muted">Edit these only if the editor can't say what you need. Saving here replaces the rules; the next save in the editor above replaces them again.</p>
+    <textarea class="form-input tpl-editor" id="tpl-content" spellcheck="false"
+              aria-label="Full email rules" oninput="tplRawChanged()"></textarea>
+    <div class="tpl-actions">
+      <span class="muted" id="tpl-count"></span>
+      <button class="btn btn-secondary btn-sm" id="tpl-raw-save" onclick="saveRawRules(this)">Save rules</button>
+    </div>
+  </details>
+</div>
+
+
+<!-- SiteWatch -->
+<div id="sitewatch" class="section">
+  <div class="section-head"><div><h2>SiteWatch</h2><p>Scan each prospect's website before Harvey writes, so the email can name a real problem and link the public report.</p></div>
+    <button class="btn btn-secondary btn-sm" onclick="loadSitewatch(true)"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh</button></div>
+
+  <div class="kpis sw-kpis">
+    <div class="kpi"><div class="kpi-label">Connection</div><div class="kpi-value sw-kv" id="sw-k-conn">…</div><div class="kpi-note" id="sw-k-conn-note"></div></div>
+    <div class="kpi"><div class="kpi-label">Scans before writing</div><div class="kpi-value sw-kv" id="sw-k-mode">…</div><div class="kpi-note" id="sw-k-mode-note"></div></div>
+    <div class="kpi"><div class="kpi-label">Prospects scanned</div><div class="kpi-value" id="sw-k-scanned">0</div><div class="kpi-note" id="sw-k-scanned-note"></div></div>
+    <div class="kpi"><div class="kpi-label">Sites with problems</div><div class="kpi-value" id="sw-k-issues">0</div><div class="kpi-note" id="sw-k-issues-note"></div></div>
+  </div>
+
+  <div class="card flush">
+    <div class="card-head"><h3>Scan a website</h3><span class="meta">Runs one scan now, by hand</span></div>
+    <div class="sw-body">
+      <div class="sw-scan-row">
+        <input class="form-input" id="sw-scan-url" placeholder="example.com or https://example.com" autocomplete="off" spellcheck="false"
+               onkeydown="if(event.key==='Enter')scanSitewatch()">
+        <button class="btn btn-primary" id="sw-scan-btn" onclick="scanSitewatch()">Scan</button>
+      </div>
+      <div id="sw-scan-result"></div>
+    </div>
+  </div>
+
+  <div class="card flush">
+    <div class="card-head"><h3>Prospect scans</h3><span class="meta" id="sw-scans-meta"></span></div>
+    <div id="sw-scans"></div>
+  </div>
+
+  <div class="card flush">
+    <div class="card-head"><h3>Setup</h3><span class="meta">Saved in Harvey's <code>.env</code> and config file</span></div>
+    <div class="sw-body">
+      <div class="settings-row">
+        <div>
+          <h3>Connection <span id="sw-conn-status" class="email-tag"></span></h3>
+          <p class="desc">Your SiteWatch address (<code>http://localhost/site-watch</code> while testing) and API token. The token must match <code>SITEWATCH_API_TOKEN</code> in SiteWatch's own <code>.env</code>.</p>
+        </div>
+        <div class="fields">
+          <div class="form-group"><label class="form-label" for="sw-url">SiteWatch address</label>
+            <input class="form-input" id="sw-url" placeholder="https://sitewatch.yourdomain.com" autocomplete="off" spellcheck="false"></div>
+          <div class="form-group"><label class="form-label" for="sw-token">API token</label>
+            <div class="with-btn"><input type="password" class="form-input" id="sw-token" placeholder="Paste the API token" autocomplete="off">
+              <button class="btn btn-secondary" onclick="toggleVisibility('sw-token')">Show</button></div></div>
+          <div class="sw-actions">
+            <button class="btn btn-primary btn-sm" onclick="saveSitewatch()">Save</button>
+            <button class="btn btn-secondary btn-sm" id="sw-test-btn" onclick="testSitewatch()">Test connection</button>
+            <span id="sw-test-result" class="sw-inline"></span>
+          </div>
+        </div>
+      </div>
+      <div class="settings-row">
+        <div>
+          <h3>Scan before writing <span id="sw-enabled-status" class="email-tag"></span></h3>
+          <p class="desc">Harvey asks SiteWatch to scan every company it's about to email. A draft waits up to an hour for its scan, then is written without it.</p>
+        </div>
+        <div class="fields">
+          <div class="sw-actions"><button class="btn btn-primary btn-sm" id="sw-toggle" onclick="toggleSitewatch()">Turn on</button>
+            <span class="desc" id="sw-enabled-detail"></span></div>
+          <ol class="sw-steps">
+            <li>Turning on also confirms the two SiteWatch signals.</li>
+            <li>Add <code>{website issues}</code> and <code>{report link}</code> to your <a href="#" onclick="showTab('templates', null);return false">email template</a>.</li>
+            <li>Restart Harvey (<code>harvey run</code>) so it picks up the change.</li>
+          </ol>
+        </div>
+      </div>
     </div>
   </div>
 </div>
+
+
 
 <!-- Help -->
 <div id="help" class="section">

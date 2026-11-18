@@ -54,6 +54,8 @@ People will ask "how does this work?" — explain it simply:
 
 - **"What are signals?"** → Signals are the facts Harvey collects about a business: who its current agency is, whether it's running ads, whether it has online booking, how it ranks. **Harvey proposes; you confirm.** Nothing is collected until the user says yes on the Signals tab (or `harvey signals --confirm ...`). That keeps spend intentional and makes every prospect list explainable — a cohort is a query over signals a human chose, not a black box.
 
+- **"Can it scan prospects' websites with SiteWatch?"** → Yes, opt-in (README, "Website scans with SiteWatch"). The same `SITEWATCH_API_TOKEN` goes in SiteWatch's `.env` and Harvey's, plus `SITEWATCH_URL` in Harvey's. Set `sitewatch: {enabled: true}` in harvey.yaml and confirm `SITEWATCH_ISSUES,SITEWATCH_STATUS,SITEWATCH_UI_ISSUES,SITEWATCH_SEO_ISSUES`. Each scan checks security, responsive & UI, and SEO (each with its own score; UI/SEO never change the security verdict), shown as two reports on one public link: **Basic** (the three scores and main problems in plain words, the one emails link) and **Advanced** (`?tab=advanced`, every check with evidence), each with its own PDF. Only approved leads (dashboard → Leads) are scanned, each heartbeat and the moment you approve them; no email is written until a lead's report is finished (a failed scan waits for Scan again / Write without report on the Leads page). Create campaign on the Leads page writes now for selected approved, report-ready leads. The email names at most two problems and links SiteWatch's public report. `harvey sitewatch test` checks the connection. The dashboard's SiteWatch page (sidebar) does the same setup without editing files: address and token, test, on/off (turning on also confirms the four signals), scan a site by hand, and every prospect scan's result. SiteWatch needs its queue worker or cron URL running, or scans never finish.
+
 ---
 
 ## Setup Flow
@@ -175,7 +177,7 @@ Ask the user these questions and build `harvey.yaml` and `skills/product_knowled
 
 ### Step 4: Confirm Signals
 
-Harvey ships a catalog of 29 signals it knows how to collect, all **proposed** and
+Harvey ships a catalog of 39 signals it knows how to collect, all **proposed** and
 none active. Nothing is prospected against until the user confirms them.
 
 Send them to `harvey dashboard` → **Signals**, where each one shows a
@@ -342,6 +344,7 @@ harvey discover              # Find businesses; --providers / --estimate / --pro
 harvey sending pause|resume  # Kill switch for all outbound
 harvey warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp, TrulyInbox warmup
 harvey trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service
+harvey sitewatch [test|scan <domain>]  # Website scans through your SiteWatch (opt-in)
 ```
 
 ### Common Issues

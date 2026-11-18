@@ -188,6 +188,7 @@ async def test_smtp_sends_the_signed_message(logo, monkeypatch):
     async def fake_send(msg, **kwargs):
         sent.append(msg)
     monkeypatch.setattr(smtp_mail.aiosmtplib, "send", fake_send)
+    monkeypatch.setattr(smtp_mail, "_connect_ipv4_first", lambda *a: object())
     cfg = config(logo=str(logo))
     cfg.persona = SimpleNamespace(name="Sam", email="sam@sender.example", company="Acme")
     env = SimpleNamespace(smtp_host="smtp.sender.example", smtp_port=587,

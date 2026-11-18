@@ -231,6 +231,117 @@ SIGNAL_CATALOG: list[dict] = [
         "cost_note": "free (robots.txt)",
         "confidence_floor": 0.0,
     },
+    # ── Website problems: things a web studio can fix, named in an email ──
+    {
+        "code": "NO_HTTPS",
+        "label": "Site not secure (no HTTPS)",
+        "description": "The site only loads over plain http://, so browsers mark it \"Not secure\" and visitors leave.",
+        "category": "profile",
+        "value_type": "bool",
+        "collector": "profile",
+        "cost_note": "free (homepage)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "NOT_MOBILE_FRIENDLY",
+        "label": "Not mobile-friendly",
+        "description": "No mobile viewport tag: on a phone the site shows the desktop layout shrunk down, hard to read and tap.",
+        "category": "profile",
+        "value_type": "bool",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "NO_META_DESCRIPTION",
+        "label": "No Google description",
+        "description": "No meta description, so Google writes its own snippet under the link. A quick SEO fix to offer.",
+        "category": "profile",
+        "value_type": "bool",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "OUTDATED_COPYRIGHT",
+        "label": "Old copyright year",
+        "description": "The footer's copyright year is two or more years old (the value is the year) — a sign nobody is looking after the site.",
+        "category": "profile",
+        "value_type": "num",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "OLD_WORDPRESS",
+        "label": "Outdated WordPress",
+        "description": "The site advertises a WordPress version older than 6.0 (the text is the version): years of missed security fixes.",
+        "category": "profile",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (homepage HTML)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "MOBILE_SPEED_SCORE",
+        "label": "Mobile speed score",
+        "description": "Google PageSpeed's mobile performance score, 0-100. Under 50 is slow on a phone: a concrete, checkable problem to name.",
+        "category": "profile",
+        "value_type": "num",
+        "collector": "profile",
+        "cost_note": "free, needs a free Google API key (PAGESPEED_API_KEY in .env); about 20 seconds a site",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "SITEWATCH_ISSUES",
+        "label": "Website issues (SiteWatch)",
+        "description": ("How many problems your SiteWatch scan found on the site at or above "
+                        "sitewatch.min_severity (injected spam, hidden links, fake CAPTCHAs, "
+                        "redirects, certificate errors). The text names the worst; the evidence "
+                        "link is the public report. Only companies you're about to email are scanned."),
+        "category": "profile",
+        "value_type": "num",
+        "collector": "sitewatch",
+        "cost_note": "free, needs your SiteWatch (sitewatch.enabled, SITEWATCH_URL and SITEWATCH_API_TOKEN); a few minutes a site",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "SITEWATCH_STATUS",
+        "label": "Website health (SiteWatch)",
+        "description": ("SiteWatch's verdict on the site: clean, review or critical (the text), "
+                        "and its risk score 0-100 (higher is worse)."),
+        "category": "profile",
+        "value_type": "text",
+        "collector": "sitewatch",
+        "cost_note": "free, comes with the SiteWatch scan above",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "SITEWATCH_UI_ISSUES",
+        "label": "Responsive & UI problems (SiteWatch)",
+        "description": ("How many problems the SiteWatch scan's separate responsive & UI report found "
+                        "at or above sitewatch.min_severity: not mobile-friendly or not responsive, "
+                        "wider than a phone, no HTTPS, slow, no clear way to get in touch, outdated "
+                        "design. The text names the worst; the evidence link is the public report."),
+        "category": "profile",
+        "value_type": "num",
+        "collector": "sitewatch",
+        "cost_note": "free, comes with the SiteWatch scan above",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "SITEWATCH_SEO_ISSUES",
+        "label": "SEO problems (SiteWatch)",
+        "description": ("How many on-page SEO problems the SiteWatch scan's separate SEO report "
+                        "found at or above sitewatch.min_severity: hidden from Google, missing titles "
+                        "or descriptions, no headings, no sitemap. The text names the worst; the "
+                        "evidence link is the public SEO report."),
+        "category": "profile",
+        "value_type": "num",
+        "collector": "sitewatch",
+        "cost_note": "free, comes with the SiteWatch scan above",
+        "confidence_floor": 0.0,
+    },
     {
         "code": "YC_BACKED",
         "label": "Backed by Y Combinator",

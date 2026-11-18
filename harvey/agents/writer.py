@@ -53,7 +53,18 @@ SEQUENCE_STYLE = """- Never be pushy or salesy. Be consultative and value-driven
 - Subject lines: lowercase, 2-5 words."""
 # Why the Writer stopped: Today and `harvey status` show it.
 EMAIL_RULES_PROBLEM_KEY = "email_rules_problem"
-BUILT_IN_FOOTER = "- No postal address, unsubscribe or opt-out line: Harvey adds them when it sends."
+# Added when the FACTS name problems on the prospect's website.
+WEBSITE_ISSUES_RULE = """
+
+WEBSITE ISSUES — the FACTS name problems found on their website. One of them
+can be your observation:
+- Name at most two, in plain words, as something a scan or a look at their
+  site turned up ("a scan of your site flagged..."). Never say or imply they
+  were hacked, careless or at fault, and don't overstate how serious it is.
+- If a website report link is listed, include it once, as plain text, so they
+  can check it themselves. Never invent a link.
+- Mention only problems listed in the FACTS."""
+BUILT_IN_FOOTER ="- No postal address, unsubscribe or opt-out line: Harvey adds them when it sends."
 
 
 def operator_rules_block(rules: str) -> str:
@@ -116,8 +127,13 @@ class Writer:
     def is_native(self) -> bool:
         return self.config.channels.email.provider in NATIVE_PROVIDERS
 
-    async def run(self):
-        """Create email campaigns for prospects that need outreach."""
+    async def run(self, only_ids: list[str] | None = None):
+        """Create email campaigns for prospects that need outreach.
+
+        ``only_ids``: write only for these leads (the Leads page's Create
+        campaign button); the same approval, address and report rules apply.
+        Returns how many leads got a campaign."""
+        self.written = 0
         logger.info("Writer: Crafting email campaigns...")
 
         # Load foundational skills for this agent
@@ -137,8 +153,19 @@ class Writer:
 
         # Get prospects that haven't been contacted yet
         new_prospects = await self.state.get_prospects_by_status("new")
+        if only_ids is not None:
+            wanted = set(only_ids)
+            new_prospects = [p for p in new_prospects if p.id in wanted]
         if not new_prospects:
             logger.info("Writer: No new prospects to write for.")
+            return
+
+        # Only leads you approved on the Leads page: pending ones wait for
+        # you, rejected ones are never written to.
+        new_prospects = [p for p in new_prospects
+                         if (getattr(p, "lead_approval", "") or "approved") == "approved"]
+        if not new_prospects:
+            logger.info("Writer: No approved leads to write for (approve them on the Leads page).")
             return
 
         # Only write for prospects we can actually deliver to. Guessed and
@@ -153,6 +180,7 @@ class Writer:
             p for p in prospects_with_email
             if not await self.state.colleague_who_replied(p.id)
         ]
+        prospects_with_email = await self._scanned_or_not_waiting(prospects_with_email)
         if not prospects_with_email:
             logger.info(
                 "Writer: No prospects with deliverable (verified/risky) emails yet."
@@ -197,6 +225,7 @@ class Writer:
                 status="draft",
             )
             campaign_id = await self.state.add_campaign(campaign)
+            self.written += len(prospects)
 
             # Mark prospects so they aren't picked up again
             for p in prospects:
@@ -315,6 +344,35 @@ class Writer:
         a raise it announced; see harvey.startups), else None."""
         return await startup_facts(getattr(self, "state", None), company_id)
 
+    async def _scanned_or_not_waiting(self, prospects: list) -> list:
+        """Leave out prospects whose website report isn't finished, while
+        scans before writing are on: no email goes out until SiteWatch has
+        a report for the company (or you chose to write without one on the
+        Leads page). A pending or failed scan holds the email."""
+        sw = getattr(self.config, "sitewatch", None)
+        if not (sw and sw.enabled and getattr(self, "env", None) is not None):
+            return prospects
+        from harvey.collectors.sitewatch import reports_required
+        if not await reports_required(self.state, self.config, self.env):
+            return prospects
+        ready = []
+        for p in prospects:
+            try:
+                ok = await self.state.sitewatch_report_ready(p.company_id)
+            except Exception:
+                ok = False
+            if ok:
+                ready.append(p)
+        if len(ready) < len(prospects):
+            logger.info(f"Writer: {len(prospects) - len(ready)} lead(s) wait for their website report.")
+        return ready
+
+    async def _website_issues(self, company_id) -> list[str] | None:
+        """Fact lines about problems on the company's website (SiteWatch
+        scan and the profile's homepage checks), else None."""
+        from harvey.collectors.sitewatch import website_issue_facts
+        return await website_issue_facts(getattr(self, "state", None), company_id)
+
     def _startup_playbook(self) -> str:
         """skills/selling_to_startups.md, for startup prospects ("" if absent)."""
         text = self.brain.load_skill("selling_to_startups") if hasattr(self.brain, "load_skill") else ""
@@ -381,6 +439,9 @@ class Writer:
         startup = await self._startup(prospect.company_id)
         if startup is not None:
             facts.extend(startup)
+        website_issues = await self._website_issues(prospect.company_id)
+        if website_issues is not None:
+            facts.extend(website_issues)
 
         prompt = self.brain.load_prompt(
             "writer",
@@ -397,6 +458,8 @@ class Writer:
             prompt += "\n\n" + self.skills
         if startup is not None:
             prompt += self._startup_playbook()
+        if website_issues is not None:
+            prompt += WEBSITE_ISSUES_RULE
         prompt += await self._feedback_block([prospect.id])
         rules = getattr(self, "email_rules", "")
         prompt += operator_rules_block(rules)
@@ -497,22 +560,33 @@ Pricing: {self.config.product.pricing}"""
         prompt += await self._feedback_block([])
         rules = getattr(self, "email_rules", "")
         prompt += operator_rules_block(rules)
+        total = self._sequence_length()
         if rules:
+            parts = ["Email 1 is the first touch", "email 2 a follow-up 3 days later",
+                     "email 3 a last one 4 days after that"][:total]
             shape = (
-                "- Email 1 is the first touch, email 2 a follow-up 3 days later, email 3 a\n"
-                "  last one 4 days after that. Follow the OPERATOR'S EMAIL RULES above for\n"
+                f"- {', '.join(parts)}. Follow the OPERATOR'S EMAIL RULES above for\n"
                 "  each one's length, structure, what it says about the product, links and\n"
                 "  subject line.")
             style = ""
             strict = ("- Follow every rule in the STRICT EMAIL RULES above that the operator's\n"
                       "  rules don't replace.")
         else:
-            shape, style = SEQUENCE_SHAPE, "\n" + SEQUENCE_STYLE
+            # One line per email in the shape; fewer emails, fewer lines.
+            shape = "\n".join(SEQUENCE_SHAPE.splitlines()[:total])
+            style = "\n" + SEQUENCE_STYLE
             strict = "- Follow every rule in the STRICT EMAIL RULES above. No exceptions."
 
+        example = ",\n".join([
+            '  {"step": 1, "subject": "...", "body": "...", "delay_days": 0}',
+            '  {"step": 2, "subject": "...", "body": "...", "delay_days": 3}',
+            '  {"step": 3, "subject": "...", "body": "...", "delay_days": 4}',
+        ][:total])
+        what = ("ONE cold outreach email (no follow-ups)" if total == 1
+                else f"a {total}-email cold outreach sequence")
         prompt += f"""
 
-Write a 3-email cold outreach sequence for prospects like these:
+Write {what} for prospects like these:
 {fence(prospect_summary, "sample prospects")}
 
 {UNTRUSTED_RULE}
@@ -525,9 +599,7 @@ Requirements:
 
 Return ONLY a JSON array (no markdown fences, no commentary):
 [
-  {{"step": 1, "subject": "...", "body": "...", "delay_days": 0}},
-  {{"step": 2, "subject": "...", "body": "...", "delay_days": 3}},
-  {{"step": 3, "subject": "...", "body": "...", "delay_days": 4}}
+{example}
 ]"""
 
         result = await self.brain.think_json(
@@ -536,7 +608,8 @@ Return ONLY a JSON array (no markdown fences, no commentary):
         )
         # Read right after the call, before anything else can use the brain.
         self._no_reply = result is None and bool(getattr(self.brain, "last_reply_empty", False))
-        steps = self._parse_sequence(result)
+        # Never more emails than configured, whatever the model returned.
+        steps = self._parse_sequence(result)[:total]
         if inbox_batch and any(
             PERSON_VAR.search(s.subject + s.body) for s in steps
         ):
@@ -551,6 +624,12 @@ Return ONLY a JSON array (no markdown fences, no commentary):
         for step, draft in zip(steps, polished):
             step.subject, step.body = draft["subject"], draft["body"]
         return steps
+
+    def _sequence_length(self) -> int:
+        """Emails per person: the intro plus writer.follow_ups (0-2)."""
+        writer_cfg = getattr(self.config, "writer", None)
+        follow_ups = getattr(writer_cfg, "follow_ups", 2)
+        return 1 + (follow_ups if isinstance(follow_ups, int) and 0 <= follow_ups <= 2 else 2)
 
     def _parse_sequence(self, result) -> list[EmailStep]:
         """Robustly coerce LLM output into a validated EmailStep list.
@@ -598,8 +677,9 @@ Return ONLY a JSON array (no markdown fences, no commentary):
         if steps and steps[0].delay_days != 0:
             steps[0].delay_days = 0  # first email always sends immediately
 
-        if len(steps) < 3:
-            logger.warning(f"Writer: Expected 3 emails, got {len(steps)}.")
+        expected = self._sequence_length()
+        if len(steps) < expected:
+            logger.warning(f"Writer: Expected {expected} emails, got {len(steps)}.")
         return steps
 
     def _group_prospects(self, prospects: list) -> dict[str, list]:

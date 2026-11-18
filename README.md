@@ -200,7 +200,7 @@ you need the Codex provider.
 
 This is the part that makes Harvey different from a black box, and it is deliberately not skippable.
 
-Harvey knows how to collect **29 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
+Harvey knows how to collect **39 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
 
 ```bash
 harvey signals                       # review the catalog
@@ -327,6 +327,36 @@ ignore environment proxies, so proxy routing cannot bypass that boundary.
 Homepage, `robots.txt`, `sitemap.xml`, plus the team and careers pages when they exist — then regex over HTML already in hand. Out comes the incumbent agency, the ad pixels, the missing schema, the abandoned blog, the open roles, the named humans.
 
 Agency detection is the compounding one. Almost every agency credits itself in the footer, and Harvey scores the wording: *"Powered by"* / *"Website by"* → 0.9 confidence; a bare descriptive link → 0.75; an unlabelled link → 0.35 and **not recorded**. A wrong incumbent in an email is worse than saying nothing.
+
+#### Website scans with SiteWatch (optional)
+
+If you run SiteWatch (a self-hosted website-security scanner), Harvey can have it scan each prospect's website **before writing to them**. The dashboard's **SiteWatch** page (in the sidebar) does all of the setup below: the address and token, a connection test, the on/off switch, a box to scan any site by hand, and the result of every prospect scan. Then the email can name a real problem, with a link to a public report the prospect can open without logging in. SiteWatch looks for hacked or broken sites: injected spam, hidden links, fake CAPTCHAs, redirects to other sites, and certificate and DNS errors.
+
+1. In SiteWatch's `.env`, set `SITEWATCH_API_TOKEN` to a long random string.
+2. In Harvey's `.env`, set `SITEWATCH_URL` (your SiteWatch address) and the same `SITEWATCH_API_TOKEN`. Check it with `harvey sitewatch test`.
+3. In `harvey.yaml`:
+   ```yaml
+   sitewatch:
+     enabled: true
+     rescan_days: 30
+     min_severity: medium   # quieter findings are recorded but never mentioned
+   ```
+4. Confirm the signals: `harvey signals --confirm SITEWATCH_ISSUES,SITEWATCH_STATUS,SITEWATCH_UI_ISSUES,SITEWATCH_SEO_ISSUES`.
+
+**Three reports per scan.** Besides the security report, each SiteWatch scan has a separate **responsive & UI report** (not mobile-friendly, fixed-width or non-responsive layout, parts wider than a phone, tiny text, no HTTPS, slow, no clear way to get in touch, outdated design, placeholder text) and a separate **SEO report** from a Semrush-style crawl of up to 100 pages of the site: broken pages and links, broken images, duplicate content, redirect problems, slow pages, sitemap errors, deep and orphan pages, plus on-page checks on every page (hidden from Google, missing or duplicate titles and descriptions, no H1, images without alt text, no structured data), scored as Site Health %. Each has its own 0-100 score (higher is better) and a "How to fix" line per item. UI and SEO findings never change the security verdict or trigger SiteWatch alerts. Harvey records them as `SITEWATCH_UI_ISSUES` and `SITEWATCH_SEO_ISSUES`.
+
+**Basic and Advanced.** The public link opens the **Basic** report: the three scores and the main problems in plain words, each with a short fix. That's the one Harvey's email links (once). The **Advanced** report (`?tab=advanced`) has every check of all three, with the evidence. Each has its own PDF. If you confirmed the SiteWatch signals before these existed, confirm the two new ones too. A prospect whose domain has permanently moved (a 301 to another domain's homepage) is scanned at its new address, so Harvey never tells them their site "redirects to another website" because of a rebrand.
+
+**How it works:**
+- Every heartbeat, Harvey asks SiteWatch to scan the sites of companies it still has someone to write to, and reads back the scans that have finished.
+- SiteWatch files these sites under a "Prospects" client, which it never scans on a schedule and never includes in its daily email.
+- SiteWatch's API can only read prospect scans, not the scans of the clients you monitor.
+- Only **approved** leads (dashboard → Leads) are scanned, and no email is written until the lead's report is finished. A failed scan waits for you: **Scan again** or **Write without report** on the Leads page. Leads with no website aren't held, and when scans are off or SiteWatch isn't set up nothing is held.
+- **Create campaign** on the Leads page writes a campaign now for the approved, report-ready leads you select; Harvey also keeps writing them on its own while `harvey run` is going.
+- The email names at most two problems, as something "a scan flagged", never as an accusation, and links the report once.
+- Clean sites get a normal email.
+
+SiteWatch scans run on its queue, so SiteWatch needs a queue worker (`php artisan queue:work`) or its cron URL running. `harvey sitewatch scan <domain>` scans one site by hand and prints what it finds. If you use the dashboard's email editor in "exact" mode, add `{website issues}` and `{report link}` to the template; that mode only changes the placeholders.
 
 ### 3. ENRICH — who decides
 
@@ -638,6 +668,8 @@ harvey sending pause|resume  # kill switch
 harvey warmup [domain]       # is the sending domain ready? (SPF/DKIM/DMARC, age, blocklists, warmup)
 harvey trulyinbox connect    # connect TrulyInbox so Harvey reads the mailbox's warmup
 harvey retry-writes          # retry prospects the Writer gave up on
+harvey sitewatch [test|scan <domain>]  # website scans through your SiteWatch (optional)
+harvey sitewatch [test|scan <domain>]  # website scans through your SiteWatch
 harvey gmail auth            # one-time Gmail OAuth
 harvey microsoft auth|test  # one-time Microsoft 365 sign-in (docs/microsoft365.md)
 ```

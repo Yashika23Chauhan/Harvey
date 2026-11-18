@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 
 from harvey.agents.scout import Scout
-from harvey.site_country import country_of_place, outside_targets, target_countries
+from harvey.site_country import country_of_place, outside_targets, site_location, target_countries
 
 GEO = ["Sydney, Australia", "Toronto, Canada", "New York, USA", "Austin, TX"]
 
@@ -68,3 +68,68 @@ def test_scout_skips_companies_outside_geography():
     assert scout._outside_geography("agency.example.co.in", {"_homepage_html": ""})
     assert not scout._outside_geography("agency.example.com.au", {"_homepage_html": ""})
     assert not scout._outside_geography("agency.example", {})
+
+
+# ── Location shown on the Companies tab ──
+
+
+def test_location_prefers_the_published_address():
+    html = ('{"@type":"LocalBusiness","address":{"@type":"PostalAddress",'
+            '"addressLocality":"Toronto","addressRegion":"ON","addressCountry":"CA"}}')
+    assert site_location("studio.example", html, "Vancouver, Canada") == "Toronto, ON, Canada"
+
+
+def test_location_falls_back_to_the_searched_place():
+    assert site_location("studio.example", "", "Sydney, Australia") == "Sydney, Australia"
+    # The site agrees with the search (an Australian domain): still the place.
+    assert site_location("studio.example.com.au", "", "Melbourne, Australia") == "Melbourne, Australia"
+
+
+def test_location_never_contradicts_the_site():
+    # Searched Toronto, but the site is Australian: say Australia, not Toronto.
+    assert site_location("studio.example.com.au", "", "Toronto, Canada") == "Australia"
+    assert site_location("maple.example.ca", "") == "Canada"
+
+
+def test_location_does_not_guess_between_us_and_canada():
+    assert site_location("growth.example", '<a href="tel:+1 (512) 555-0100">') == "USA or Canada"
+
+
+def test_no_evidence_no_location():
+    assert site_location("agency.example", "<h1>Hi</h1>") == ""
+
+
+def test_search_queries_remember_their_place():
+    scout = Scout.__new__(Scout)
+    scout.config = SimpleNamespace(icp=SimpleNamespace(
+        industries=["web development company"], geography=["Sydney, Australia", "Austin, TX"],
+        company_size=""))
+    queries = scout._build_company_search_queries()
+    assert {scout._query_places[q] for q in queries} == {"Sydney, Australia", "Austin, TX"}
+
+
+def test_city_and_country_come_from_the_same_address():
+    # Two offices: the first address has no city, the second is complete.
+    html = ('{"address":{"addressCountry":"CA"}} '
+            '{"address":{"addressLocality":"Seattle","addressRegion":"WA","addressCountry":"US"}}')
+    assert site_location("tools.example", html) == "Seattle, WA, USA"
+
+
+def test_street_lines_are_not_a_city():
+    html = '{"address":{"addressLocality":"Unit 4, 12 Example Road, near Gate No. 4","addressCountry":"IN"}}'
+    assert site_location("news.example", html) == "India"
+
+
+def test_missing_country_comes_from_the_domain():
+    html = '{"address":{"addressLocality":"Surry Hills","addressRegion":"NSW"}}'
+    assert site_location("studio.example.com.au", html) == "Surry Hills, NSW, Australia"
+
+
+def test_country_codes_read_as_names():
+    assert site_location("tools.example", '{"address":{"addressCountry":"SG"}}') == "Singapore"
+
+
+def test_three_letter_country_codes():
+    html = '{"address":{"addressLocality":"Surry Hills","addressRegion":"NSW","addressCountry":"AUS"}}'
+    assert site_location("studio.example", html) == "Surry Hills, NSW, Australia"
+    assert country_of_place("Perth, AUS") == "AU"

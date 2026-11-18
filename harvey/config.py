@@ -420,7 +420,53 @@ class PreclearedConfig(BaseModel):
         return self
 
 
-DEFAULT_OPT_OUT_LINE = 'Not interested? Reply "no thanks" and I won\'t email again.'
+class LeadsConfig(BaseModel):
+    """Lead approval: with require_approval on (the default), every lead
+    Scout finds waits as 'pending' on the dashboard's Leads page, and Harvey
+    only writes to the ones you approve."""
+
+    require_approval: bool = True
+
+
+SITEWATCH_SEVERITIES = ("critical", "high", "medium", "low")
+
+
+class SiteWatchConfig(BaseModel):
+    """Optional website scan through your own SiteWatch before writing.
+
+    Off by default. When on, every prospect company's website is scanned by
+    SiteWatch (SITEWATCH_URL and SITEWATCH_API_TOKEN in .env), and the
+    writer may name what it found, with the public report link. See
+    harvey/integrations/sitewatch.py.
+    """
+
+    enabled: bool = False
+    # How long the writer waits for a scan before writing without it.
+    # No longer used: drafts now wait for a finished report (or your
+    # "write without report" on the Leads page). Kept so old configs load.
+    max_wait_minutes: int = 60
+    # Scan a company's site again after this many days.
+    rescan_days: int = 30
+    # Findings below this severity are recorded but never mentioned.
+    min_severity: str = "medium"
+
+    @field_validator("min_severity", mode="before")
+    @classmethod
+    def _valid_severity(cls, v) -> str:
+        v = str(v or "medium").strip().lower()
+        if v not in SITEWATCH_SEVERITIES:
+            raise ValueError(f"'{v}' is not a severity. Use one of: {', '.join(SITEWATCH_SEVERITIES)}.")
+        return v
+
+    @field_validator("max_wait_minutes", "rescan_days")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("must be 1 or more.")
+        return v
+
+
+DEFAULT_OPT_OUT_LINE ='Not interested? Reply "no thanks" and I won\'t email again.'
 # The replies the Handler always honours as an opt-out on their own; an
 # opt_out_line must ask for one of them ("Reply STOP", 'reply "no thanks"').
 OPT_OUT_WORDS = ("no thanks", "no thank you", "unsubscribe", "stop", "remove me",
@@ -669,6 +715,9 @@ class WriterConfig(BaseModel):
     # The FACTS rule, the send gate and do-not-contact still apply. A file
     # that is set but can't be read stops writing until it's fixed.
     email_rules: str = ""
+    # Follow-ups after the first email, 0-2. 0 means one email per person and
+    # nothing more: no sequence is written past the intro, so none can send.
+    follow_ups: int = 2
 
     @field_validator("email_rules", mode="before")
     @classmethod
@@ -676,6 +725,15 @@ class WriterConfig(BaseModel):
         if v is None:
             return ""
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("follow_ups", mode="before")
+    @classmethod
+    def _follow_ups_range(cls, v):
+        if v is None or v == "":
+            return 2
+        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 2:
+            raise ValueError("must be 0, 1 or 2")
+        return v
 
 
 # Long enough for a full house style with examples; anything bigger is
@@ -723,6 +781,8 @@ class HarveyConfig(BaseModel):
     brain: BrainConfig = BrainConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
+    sitewatch: SiteWatchConfig = SiteWatchConfig()
+    leads: LeadsConfig = LeadsConfig()
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)
@@ -758,6 +818,9 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    # Optional: only used when sitewatch.enabled is true.
+    sitewatch_url: str = ""
+    sitewatch_api_token: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -873,6 +936,8 @@ def load_env() -> EnvConfig:
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        sitewatch_url=os.getenv("SITEWATCH_URL", "").strip().rstrip("/"),
+        sitewatch_api_token=os.getenv("SITEWATCH_API_TOKEN", "").strip(),
     )
     return env
 
@@ -960,6 +1025,81 @@ def set_require_approval(value: bool, path=None) -> Path:
 
 
 _mode_cache: dict[str, tuple[tuple, object]] = {}
+
+_SITEWATCH_KEY_RE = re.compile(r"^sitewatch[ \t]*:[ \t]*(?:#.*)?$", re.MULTILINE)
+
+
+def _with_sitewatch_enabled(raw: str, word: str) -> list[str]:
+    """Ways to say sitewatch.enabled: <word> in ``raw``: change the line in a
+    top-level ``sitewatch:`` block, add one under it, or add the block."""
+    m = _SITEWATCH_KEY_RE.search(raw)
+    if not m:
+        return [raw.rstrip("\n") + f"\n\nsitewatch:\n  enabled: {word}\n"]
+    lines = raw.split("\n")
+    key_index = raw[:m.start()].count("\n")
+    out, child = [], "  "
+    for i in range(key_index + 1, len(lines)):
+        line = lines[i]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = line[:len(line) - len(line.lstrip(" \t"))]
+        if not indent:
+            break                      # the next top-level key: block ended
+        child = indent
+        em = re.match(r"^([ \t]+enabled[ \t]*:[ \t]*)([^\s#]+)", line)
+        if em:
+            changed = lines[:i] + [em.group(1) + word + line[em.end():]] + lines[i + 1:]
+            out.append("\n".join(changed))
+    added = lines[:key_index + 1] + [f"{child}enabled: {word}"] + lines[key_index + 1:]
+    out.append("\n".join(added))
+    return out
+
+
+def set_sitewatch_enabled(value: bool, path=None) -> Path:
+    """Write sitewatch.enabled into the config file Harvey reads
+    (harvey.local.yaml wins, as in load_config). Only that value changes: the
+    result must parse to the same settings apart from it, or nothing is
+    written and ConfigError says to set it by hand."""
+    import copy
+    import shutil
+    path = Path(path or _find_config_file())
+    target = path.resolve()
+    data_bytes = target.read_bytes()
+    bom = data_bytes.startswith(b"\xef\xbb\xbf")
+    word = "true" if value else "false"
+    by_hand = f"Set sitewatch: {{enabled: {word}}} in {path.name} by hand."
+    try:
+        raw = data_bytes.decode("utf-8-sig").replace("\r\n", "\n")
+        data = yaml.safe_load(raw)
+    except (UnicodeDecodeError, yaml.YAMLError):
+        raise ConfigError(f"{path.name} couldn't be read safely. {by_hand}")
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path.name} isn't a settings file. {by_hand}")
+    expected = copy.deepcopy(data)
+    section = expected.get("sitewatch")
+    if section is None:
+        section = expected["sitewatch"] = {}
+    if not isinstance(section, dict):
+        raise ConfigError(f"sitewatch in {path.name} isn't a section. {by_hand}")
+    section["enabled"] = bool(value)
+    for new in _with_sitewatch_enabled(raw, word):
+        try:
+            if yaml.safe_load(new) != expected:
+                continue
+        except yaml.YAMLError:
+            continue
+        HarveyConfig(**expected)
+        if b"\r\n" in data_bytes:
+            new = new.replace("\n", "\r\n")
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            tmp.write_bytes((b"\xef\xbb\xbf" if bom else b"") + new.encode("utf-8"))
+            shutil.copymode(target, tmp)
+            os.replace(tmp, target)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return path
+    raise ConfigError(f"Couldn't change sitewatch.enabled in {path.name} safely. {by_hand}")
 
 
 def refresh_sending_mode(config, path=None) -> bool:

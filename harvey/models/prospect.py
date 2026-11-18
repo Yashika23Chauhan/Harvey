@@ -32,6 +32,10 @@ class Prospect(BaseModel):
     source: str = ""           # how we found them
     source_url: str = ""       # where we found the info
     status: str = "new"        # new/contacted/replied/meeting/closed/lost
+    # Lead approval: pending (waits for you), approved, rejected. The Writer
+    # only drafts for approved leads; Scout saves new ones as pending while
+    # leads.require_approval is on.
+    lead_approval: str = "approved"
     score: int = 0
     personalization_notes: str = ""
     # IANA time zone for the send window ("Europe/Oslo"), once known.

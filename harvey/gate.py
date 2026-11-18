@@ -372,6 +372,13 @@ def allowed_link_domains(config) -> set[str]:
         out.add(_host(address.rsplit("@", 1)[1]))
     for entry in getattr(email_cfg, "link_domains", None) or []:
         out.update(find_link_domains(str(entry)) or [_host(str(entry))])
+    # Your SiteWatch, whose public scan reports the writer may link to.
+    sitewatch = getattr(config, "sitewatch", None)
+    if getattr(sitewatch, "enabled", False) is True:
+        import os
+        url = os.getenv("SITEWATCH_URL", "").strip()
+        if url:
+            out.update(find_link_domains(url) or [_host(url)])
     return {d for d in out if d}
 
 

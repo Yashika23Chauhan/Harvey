@@ -248,8 +248,19 @@ function actionText(a) {
   const camp = escHtml(d.campaign_name || d.campaign || '');
   const intent = d.intent ? ' · ' + escHtml(String(d.intent).replace(/_/g, ' ')) : '';
   const n = (v, one, many) => (Number(v) || 0) + ' ' + ((Number(v) || 0) === 1 ? one : many);
+  // Harvey's own check-ins log what it decided to do that cycle, no details.
+  if (a.agent === 'main') return ({
+    idle: 'Checked in, nothing to do', prospect: 'Checked in and looked for new leads',
+    write_campaign: 'Checked in and wrote emails', send_campaign: 'Checked in and sent emails',
+  })[a.action_type] || 'Checked in: ' + escHtml(String(a.action_type || '').replace(/_/g, ' '));
   switch (a.action_type) {
-    case 'prospect': return 'Found ' + n(d.prospects_found, 'new contact', 'new contacts');
+    case 'prospect': return Number(d.prospects_found) ? 'Found ' + n(d.prospects_found, 'new contact', 'new contacts')
+      : 'Searched for leads, nothing new this time';
+    case 'manual_reply': return 'You replied to ' + (who || 'a contact');
+    case 'conversation_reply_mode': return d.mode === 'auto'
+      ? 'You let AI answer a conversation on its own' : 'You set a conversation to “AI drafts, you approve”';
+    case 'lead_approval': return 'You ' + ({approved: 'approved', rejected: 'rejected', pending: 'moved back to waiting'}[d.approval] || escHtml(d.approval || 'changed')) +
+      ' ' + n(d.count, 'lead', 'leads');
     case 'write_campaign': return 'Wrote “' + camp + '” for ' + n(d.prospect_count, 'contact', 'contacts');
     case 'write_failed': return 'Couldn’t write for some contacts' + (camp ? ' in “' + camp + '”' : '');
     case 'stage_campaign': return 'Queued ' + n(d.staged, 'email', 'emails') + ' from “' + camp + '”' +
@@ -456,7 +467,34 @@ function toggleVisibility(inputId) {
 
 // ── Tabs ──
 
+// Lead settings has tabs: the search form, then the old Settings, API
+// Integration and Controls pages.
+const LEADS_PANES = ['find', 'integrations', 'controls', 'settings'];
+let _leadsPane = 'find';
+
+function setLeadsPane(pane) {
+  _leadsPane = LEADS_PANES.includes(pane) ? pane : 'find';
+  LEADS_PANES.forEach(p => {
+    document.getElementById('leads-pane-' + p).hidden = p !== _leadsPane;
+    const b = document.getElementById('leads-tab-' + p);
+    b.classList.toggle('on', p === _leadsPane);
+    b.setAttribute('aria-selected', p === _leadsPane);
+  });
+  if (_leadsPane === 'settings') { loadSettings(); loadSendingModeCard(); }
+  else if (_leadsPane === 'integrations') loadIntegrations();
+  else if (_leadsPane === 'controls') { loadHarveyStatus(); loadLogs(); }
+  else loadLeadRequest();
+}
+
 function showTab(id, btn) {
+  // Settings and API Integration now live in Lead settings; old links still work.
+  if (id === 'settings' || id === 'integrations' || id === 'controls') {
+    _leadsPane = id;
+    id = 'leads';
+    btn = btn || [...document.querySelectorAll('nav button')].find(b => (b.getAttribute('onclick') || '').includes("'leads'"));
+  } else if (id === 'leads' && btn) {
+    _leadsPane = 'find';
+  }
   currentTab = id;
   if (id === 'companies') companyDrill = false;
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
@@ -471,7 +509,8 @@ function loadCurrentTab() {
     case 'today': loadLiveStatus(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
-    case 'leads': loadLeadRequest(); break;
+    case 'leads': setLeadsPane(_leadsPane); break;
+    case 'found': loadFoundLeads(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
@@ -479,9 +518,8 @@ function loadCurrentTab() {
     case 'conversations': loadConversations(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
-    case 'integrations': loadIntegrations(); break;
-    case 'settings': loadSettings(); loadSendingModeCard(); break;
-    case 'controls': loadHarveyStatus(); loadLogs(); break;
+    case 'sitewatch': loadSitewatch(true); break;
+    case 'templates': loadTemplate(); break;
   }
 }
 
@@ -501,6 +539,7 @@ async function loadToday() {
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
+  navCount('nav-found', (data.stats || {}).leads_pending || 0);
   navCount('nav-conversations', convoBadge(data.stats));
   _todayStats = data.stats || {};
   renderFigures(_todayStats);
@@ -1278,6 +1317,216 @@ function pageCohort(dir) {
   runCohort();
 }
 
+// ── Email template ──
+// One email per lead (writer.follow_ups: 0). The server turns it into the
+// rules file the Writer reads; Advanced edits that file raw.
+
+const TPL_SAMPLE = {first: 'Jane', last: 'Cooper', agency: 'Acme Digital', email: 'jane@acme.example'};
+const TPL_MODE_HINT = {
+  exact: 'Sent word for word. Only the placeholders change.',
+  adapt: 'Same message and length; a few words tuned to each agency.',
+};
+const tplFocus = {};
+let _tpl = null;          // {mode, emails: [{subject, body}]} as loaded
+let _tplMode = 'exact';
+let _tplSavedJson = '';   // what was last loaded/saved, to spot unsaved edits
+let _tplRawSaved = '';
+let _tplLimit = 20000;
+let _tplPlaceholders = ['{first name}', '{agency name}', '{sender name}'];
+let _tplSender = {name: 'Sam', company: ''};
+let _tplAiDraft = null;   // the last "Write with AI" result, while it's shown
+
+function tplRead() {
+  return {mode: _tplMode, emails: [{
+    subject: document.getElementById('tpl-subject-0').value,
+    body: document.getElementById('tpl-body-0').value}]};
+}
+
+function tplFill(text) {
+  const fill = {'{first name}': TPL_SAMPLE.first, '{agency name}': TPL_SAMPLE.agency,
+                '{sender name}': (_tplSender.name || 'Sam').split(' ')[0],
+                '{website issues}': 'hidden links to other websites on your homepage',
+                '{report link}': 'https://sitewatch.example/report/sample'};
+  let out = String(text || '');
+  for (const [k, v] of Object.entries(fill)) out = out.split(k).join(v);
+  return out.replace(/[ \t]+([,.!?])/g, '$1');
+}
+
+function tplMailHtml(to, subject, body, subjectIsAuto) {
+  const from = escHtml(_tplSender.name || 'You') + (_tplSender.company ? ' <span class="muted">· ' + escHtml(_tplSender.company) + '</span>' : '');
+  return '<div class="tpl-mail-row"><span>From</span><b>' + from + '</b></div>' +
+    '<div class="tpl-mail-row"><span>To</span><b>' + to + '</b></div>' +
+    '<div class="tpl-mail-row tpl-mail-subject"><span>Subject</span>' +
+      (subjectIsAuto ? '<i class="muted">AI writes a short subject</i>' : '<b>' + escHtml(subject) + '</b>') + '</div>' +
+    '<div class="tpl-mail-body">' + (body.trim() ? escHtml(body) : '<span class="muted">Your message will appear here.</span>') + '</div>';
+}
+
+function tplShowSample() {
+  _tplAiDraft = null;
+  const e = tplRead().emails[0];
+  document.getElementById('tpl-preview-title').textContent = 'Preview';
+  document.getElementById('tpl-preview-badge').textContent = 'Example lead';
+  document.getElementById('tpl-preview-badge').className = 'tpl-badge';
+  document.getElementById('tpl-ai-reset').hidden = true;
+  document.getElementById('tpl-mail').innerHTML = tplMailHtml(
+    escHtml(TPL_SAMPLE.first + ' ' + TPL_SAMPLE.last) + ' <span class="muted">· ' + escHtml(TPL_SAMPLE.agency) + '</span>',
+    tplFill(e.subject), tplFill(e.body), !e.subject.trim());
+}
+
+function tplAutoGrow() {
+  const box = document.getElementById('tpl-body-0');
+  box.style.height = 'auto';
+  box.style.height = Math.max(260, box.scrollHeight + 2) + 'px';
+}
+
+function tplEdited() {
+  const e = tplRead().emails[0];
+  tplAutoGrow();
+  const words = (e.body.match(/\S+/g) || []).length;
+  document.getElementById('tpl-words').textContent = words + ' words · ' + e.body.length.toLocaleString() + ' / 3,000';
+  if (!_tplAiDraft) tplShowSample();
+  const dirty = _tpl && JSON.stringify(tplRead()) !== _tplSavedJson;
+  const dirtyEl = document.getElementById('tpl-dirty');
+  dirtyEl.textContent = dirty ? 'Unsaved changes' : 'All changes saved';
+  dirtyEl.className = dirty ? 'tpl-unsaved' : 'muted';
+  document.getElementById('tpl-save').disabled = !dirty;
+}
+
+function tplSetMode(mode) {
+  _tplMode = mode === 'adapt' ? 'adapt' : 'exact';
+  document.querySelectorAll('#tpl-mode button').forEach(b => {
+    const on = b.dataset.mode === _tplMode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  });
+  document.getElementById('tpl-mode-hint').textContent = TPL_MODE_HINT[_tplMode];
+  if (_tpl) tplEdited();
+}
+
+function tplInsert(token) {
+  const box = document.getElementById(tplFocus[0] === 'subject' ? 'tpl-subject-0' : 'tpl-body-0');
+  const start = box.selectionStart ?? box.value.length, end = box.selectionEnd ?? box.value.length;
+  box.value = box.value.slice(0, start) + token + box.value.slice(end);
+  box.focus();
+  box.selectionStart = box.selectionEnd = start + token.length;
+  tplEdited();
+}
+
+function tplRenderChips() {
+  const help = {'{first name}': 'Their first name. Left out for a team inbox.',
+                '{agency name}': 'Their agency\'s name, or "your agency" if unknown.',
+                '{sender name}': 'Your first name.',
+                '{website issues}': 'Problems a SiteWatch scan found on their site. The sentence is dropped when there are none.',
+                '{report link}': 'Link to the public SiteWatch report. The sentence is dropped when there is none.'};
+  document.getElementById('tpl-chips').innerHTML = '<span class="tpl-label">Insert</span>' +
+    _tplPlaceholders.map(p => '<button type="button" class="tpl-chip" title="' + escHtml(help[p] || '') + '" ' +
+      'onmousedown="event.preventDefault()" onclick="tplInsert(' + jsq(p) + ')">' + escHtml(p) + '</button>').join('');
+}
+
+async function loadTemplate(discard) {
+  // Coming back to the tab mustn't throw away an edit in progress.
+  const dirty = _tpl && JSON.stringify(tplRead()) !== _tplSavedJson;
+  if (!discard && dirty) { tplEdited(); return; }
+  if (discard && dirty && !confirm('Throw away your unsaved changes?')) return;
+  const d = await api('/api/email-template');
+  if (!d) return;
+  if (d.error) { showToast(d.error, 'error'); return; }
+  _tplLimit = d.limit || _tplLimit;
+  _tplPlaceholders = d.placeholders || _tplPlaceholders;
+  _tplSender = d.sender || _tplSender;
+  _tpl = d.editor;
+  const first = (_tpl.emails || [])[0] || {subject: '', body: ''};
+  document.getElementById('tpl-subject-0').value = first.subject || '';
+  document.getElementById('tpl-body-0').value = first.body || '';
+  tplSetMode(_tpl.mode);
+  // Saved state is what the editor holds now; out of sync means a save is due.
+  _tplSavedJson = d.editor_in_sync ? JSON.stringify(tplRead()) : '';
+  document.getElementById('tpl-meta').innerHTML =
+    '<span class="tpl-pill ' + (d.active ? 'on' : '') + '">' + (d.active ? 'In use' : 'Not in use yet') + '</span>' +
+    '<span class="muted">One email per lead · no follow-ups</span>';
+  const notice = document.getElementById('tpl-notice');
+  notice.hidden = d.editor_in_sync || !d.content;
+  notice.textContent = 'Harvey is using rules written in Advanced, not this editor. Save here to put the editor back in charge.';
+  tplRenderChips();
+  _tplAiDraft = null;
+  tplEdited();
+  _tplRawSaved = d.content || '';
+  document.getElementById('tpl-content').value = _tplRawSaved;
+  tplRawChanged();
+  loadTemplateLeads();
+}
+
+function tplRawChanged() {
+  const box = document.getElementById('tpl-content');
+  const dirty = box.value !== _tplRawSaved;
+  document.getElementById('tpl-count').textContent = box.value.length.toLocaleString() + ' / ' +
+    _tplLimit.toLocaleString() + ' characters' + (dirty ? ' · unsaved changes' : '');
+  document.getElementById('tpl-raw-save').disabled = !dirty;
+}
+
+async function loadTemplateLeads() {
+  const sel = document.getElementById('tpl-lead');
+  if (sel.options.length) return;
+  const rows = await api('/api/prospects');
+  const people = (rows || []).filter(p => p.company_id && !['opted_out', 'bounced'].includes(p.status))
+    .sort((a, b) => (!!b.first_name - !!a.first_name) || ((b.score || 0) - (a.score || 0)));
+  sel.innerHTML = '<option value="">Best lead (automatic)</option>' + people.slice(0, 60).map(p =>
+    '<option value="' + escHtml(p.id) + '">' + escHtml(((p.first_name || '') + ' ' + (p.last_name || '')).trim() || 'General inbox') +
+    ' — ' + escHtml(p.company || '') + '</option>').join('');
+}
+
+async function postTemplate(payload, btn, okMsg) {
+  btn.disabled = true;
+  const r = await api('/api/email-template', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)});
+  if (r && r.success) {
+    showToast(okMsg, 'success');
+    _tpl = null;  // reload everything from what was saved
+    await loadTemplate(true);
+  } else {
+    btn.disabled = false;
+    showToast(failMsg(r, 'Could not save the template.'), 'error');
+  }
+}
+
+function saveTemplate(btn) {
+  if (!tplRead().emails[0].body.trim()) { showToast('Write the message first.', 'error'); return; }
+  postTemplate({editor: tplRead()}, btn, 'Template saved. Harvey uses it for the next emails it writes.');
+}
+
+function saveRawRules(btn) {
+  const content = document.getElementById('tpl-content').value;
+  if (!content.trim()) { showToast('The rules are empty.', 'error'); return; }
+  if (!confirm('Replace Harvey\'s rules with this text? The editor above stops matching until you save it again.')) return;
+  postTemplate({content}, btn, 'Rules saved.');
+}
+
+async function previewTemplate(btn) {
+  if (!tplRead().emails[0].body.trim()) { showToast('Write the message first.', 'error'); return; }
+  const mail = document.getElementById('tpl-mail');
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Writing…';
+  mail.classList.add('tpl-loading');
+  const r = await api('/api/email-template/preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({editor: tplRead(), prospect_id: document.getElementById('tpl-lead').value})});
+  btn.disabled = false;
+  btn.innerHTML = label;
+  mail.classList.remove('tpl-loading');
+  if (!r || !r.success) { showToast(failMsg(r, 'Could not write a preview.'), 'error'); return; }
+  _tplAiDraft = r;
+  const to = r.to || {};
+  document.getElementById('tpl-preview-title').textContent = 'AI draft';
+  const badge = document.getElementById('tpl-preview-badge');
+  badge.textContent = 'Not saved · not sent';
+  badge.className = 'tpl-badge ai';
+  document.getElementById('tpl-ai-reset').hidden = false;
+  mail.innerHTML = tplMailHtml(
+    escHtml(to.name || '') + (to.company ? ' <span class="muted">· ' + escHtml(to.company) + '</span>' : '') +
+      (to.email_status ? ' <span class="email-tag ' + escHtml(to.email_status) + '">' + escHtml(to.email_status) + '</span>' : ''),
+    r.subject, r.body, false);
+}
+
 // ── API Integration ──
 
 async function loadIntegrations() {
@@ -1296,6 +1545,266 @@ function saveTinyfish() {
   const key = document.getElementById('tinyfish-key').value;
   if (!key) { showToast('Enter your TinyFish API key first.', 'error'); return; }
   saveEnv({TINYFISH_API_KEY: key}, 'TinyFish key saved.').then(loadIntegrations);
+}
+
+// ── SiteWatch: website scans of prospects ──
+
+let _swEnabled = false;
+let _swPoll = null;
+let _swTick = null;
+
+function swTag(id, ok, okLabel, badLabel) {
+  const el = document.getElementById(id);
+  el.className = 'email-tag ' + (ok ? 'verified' : 'guess');
+  el.textContent = ok ? okLabel : badLabel;
+}
+
+function swStatusTag(status) {
+  const cls = {clean: 'verified', review: 'risky', critical: 'invalid'}[status] || 'guess';
+  return status ? '<span class="email-tag ' + cls + '">' + escHtml(status) + '</span>' : '';
+}
+
+function swKpi(id, text, tone, note) {
+  const el = document.getElementById(id);
+  el.className = 'kpi-value sw-kv ' + (tone || '');
+  el.innerHTML = (tone === 'good' || tone === 'bad' ? '<span class="status-dot ' + (tone === 'good' ? 'running' : 'offline') + '"></span>' : '') + escHtml(text);
+  document.getElementById(id + '-note').innerHTML = note || '';
+}
+
+function swLink(u, t) {
+  return safeHref(u) ? '<a href="' + safeHref(u) + '" target="_blank" rel="noopener noreferrer">' + escHtml(t) + '</a>' : '';
+}
+
+// The scan's separate UI and SEO reports, from fields ui_issues / ui_text / ui_report_url (and seo_).
+const SW_AUDITS = [['ui', 'Responsive & UI'], ['seo', 'SEO']];
+
+function swAuditSummary(o) {
+  return SW_AUDITS.map(([k, label]) => {
+    const n = o[k + '_issues'];
+    if (typeof n !== 'number') return '';
+    return '<div class="sw-audit"><b>' + escHtml(label) + ':</b> ' +
+      (n ? n + ' problem' + (n === 1 ? '' : 's') + (o[k + '_text'] ? '<div class="sw-issue-text">' + escHtml(o[k + '_text']) + '</div>' : '')
+         : '<span class="muted">nothing worth mentioning</span>') + '</div>';
+  }).join('');
+}
+
+// SiteWatch's two reports: Basic (scores and main problems, the one emails link) and
+// Advanced (every check). Any report link of a scan starts with the Basic one.
+function swBasicUrl(...urls) {
+  for (const u of urls) {
+    const s = String(u || '').trim();
+    if (/^https?:\/\//i.test(s)) return s.split('#')[0].split('?')[0];
+  }
+  return '';
+}
+
+function swReportLinks(o, securityUrl) {
+  const basic = swBasicUrl(securityUrl, o.ui_report_url, o.seo_report_url);
+  return basic ? swLink(basic, 'Reports') : '';   // opens Basic; the page has the Basic / Advanced tabs
+}
+
+// Checks the connection itself (one quick ping) so the tile says what is true now.
+async function swCheckConnection(d) {
+  if (!(d.url && d.token_set)) { swKpi('sw-k-conn', 'Not set up', 'off', 'Add the address and token under Setup'); return; }
+  swKpi('sw-k-conn', 'Checking…', 'off', escHtml(d.url));
+  const r = await api('/api/sitewatch/test', {method: 'POST'});
+  if (r && r.success) swKpi('sw-k-conn', 'Connected', 'good', escHtml(d.url));
+  else swKpi('sw-k-conn', 'Not connected', 'bad', escHtml((r && r.message) || 'No answer'));
+}
+
+async function loadSitewatch(recheck) {
+  const d = await api('/api/sitewatch');
+  if (!d) return;
+  const url = document.getElementById('sw-url');
+  if (document.activeElement !== url) url.value = d.url || '';
+  const tok = document.getElementById('sw-token');
+  tok.value = '';
+  tok.placeholder = d.token_set ? 'Saved — enter new value to change' : 'Paste the API token';
+  swTag('sw-conn-status', d.url && d.token_set, 'set', 'not set');
+  if (recheck !== false) swCheckConnection(d);
+
+  _swEnabled = !!d.enabled;
+  const allConfirmed = d.codes.every(c => d.confirmed.includes(c));
+  const on = _swEnabled && allConfirmed;
+  swTag('sw-enabled-status', on, 'on', _swEnabled ? 'signals not confirmed' : 'off');
+  swKpi('sw-k-mode', on ? 'On' : 'Off', on ? 'good' : 'off',
+    on ? 'Restart <code>harvey run</code> after a change' : 'Turn on under Setup');
+  const toggle = document.getElementById('sw-toggle');
+  toggle.textContent = _swEnabled ? 'Turn off' : 'Turn on';
+  toggle.className = 'btn btn-sm ' + (_swEnabled ? 'btn-secondary' : 'btn-primary');
+  document.getElementById('sw-enabled-detail').innerHTML = d.config_error
+    ? '<span class="error-text">Couldn\'t read the config: ' + escHtml(d.config_error) + '</span>'
+    : 'Saved in <code>' + escHtml(d.config_file || 'harvey.yaml') + '</code>';
+  const nav = document.getElementById('nav-sitewatch');
+  if (nav) nav.textContent = d.pending ? d.pending : '';
+
+  const done = d.scans.filter(s => s.state === 'done');
+  const withIssues = done.filter(s => s.issues > 0);
+  const scanned = document.getElementById('sw-k-scanned');
+  scanned.textContent = done.length;
+  scanned.className = 'kpi-value' + (done.length ? '' : ' zero');
+  document.getElementById('sw-k-scanned-note').innerHTML = d.pending ? '<b>' + d.pending + '</b> waiting for a result' : 'by Harvey, before writing';
+  const issues = document.getElementById('sw-k-issues');
+  issues.textContent = withIssues.length;
+  issues.className = 'kpi-value' + (withIssues.length ? '' : ' zero');
+  document.getElementById('sw-k-issues-note').innerHTML = done.length
+    ? Math.round(100 * withIssues.length / done.length) + '% of scanned sites' : 'nothing scanned yet';
+
+  document.getElementById('sw-scans-meta').textContent = d.scans.length ? d.scans.length + ' compan' + (d.scans.length === 1 ? 'y' : 'ies') : '';
+  const el = document.getElementById('sw-scans');
+  if (!d.scans.length) {
+    el.innerHTML = emptyState(icon('shield'), 'No prospects scanned yet',
+      'Harvey scans the website of each company it is about to email, once <b>Scan before writing</b> is on and Harvey is running ' +
+      '(<code>harvey run</code>). Scans you run by hand above show their result there.');
+    return;
+  }
+  el.innerHTML = '<table><thead><tr><th>Company</th><th>Result</th><th>What was found</th><th>Report</th><th>When</th></tr></thead><tbody>' +
+    d.scans.map(s => {
+      const result = s.state === 'pending'
+        ? '<span class="email-tag guess"><span class="spinner" aria-hidden="true" style="width:10px;height:10px;margin-right:4px"></span>scanning</span>'
+        : s.state === 'failed' ? '<span class="email-tag invalid" title="' + escHtml(s.error || '') + '">failed</span>'
+        : swStatusTag(s.status) + (typeof s.score === 'number' ? '<div class="muted" style="margin-top:4px">risk ' + s.score + '/100</div>' : '');
+      const found = s.state === 'done'
+        ? (s.issues ? '<b>' + s.issues + ' security problem' + (s.issues === 1 ? '' : 's') + '</b><div class="sw-issue-text">' + escHtml(s.issue_text || '') + '</div>'
+                    : '<span class="muted">No security problems worth mentioning</span>') + swAuditSummary(s)
+        : s.state === 'failed' ? '<span class="muted">' + escHtml(s.error || '') + '</span>' : '';
+      return '<tr><td><b>' + escHtml(s.company || '') + '</b><div class="muted">' + escHtml(s.domain || '') + '</div></td>' +
+        '<td>' + result + '</td><td>' + found + '</td>' +
+        '<td>' + swReportLinks(s, s.report_url) + '</td>' +
+        '<td class="muted">' + escHtml(String(s.finished_at || s.requested_at || '').slice(0, 16)) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+async function saveSitewatch() {
+  const payload = {SITEWATCH_URL: document.getElementById('sw-url').value.trim()};
+  const token = document.getElementById('sw-token').value.trim();
+  if (token) payload.SITEWATCH_API_TOKEN = token;
+  await saveEnv(payload, 'SiteWatch settings saved.');
+  loadSitewatch(true);
+}
+
+async function testSitewatch() {
+  const out = document.getElementById('sw-test-result');
+  const btn = document.getElementById('sw-test-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>Testing…';
+  out.innerHTML = '';
+  const r = await api('/api/sitewatch/test', {method: 'POST'});
+  btn.disabled = false;
+  btn.textContent = 'Test connection';
+  out.innerHTML = r && r.success ? '<span class="success-text">' + escHtml(r.message) + '</span>'
+    : '<span class="error-text">' + escHtml((r && r.message) || 'No answer from the dashboard.') + '</span>';
+  loadSitewatch(true);
+}
+
+async function toggleSitewatch() {
+  const on = !_swEnabled;
+  if (on && !confirm('Turn on website scans before writing? This also confirms the SiteWatch signals.')) return;
+  const btn = document.getElementById('sw-toggle');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>Saving…';
+  const r = await api('/api/sitewatch/enabled', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: on})});
+  btn.disabled = false;
+  showToast((r && r.message) || 'Couldn\'t change the setting.', r && r.success ? 'success' : 'error');
+  loadSitewatch(false);
+}
+
+function swFindingsHtml(r, url) {
+  const shown = r.findings.filter(f => f.severity !== 'info');
+  const tone = {review: 'review', critical: 'critical'}[r.status] || '';
+  const head = '<div class="sw-result-head"><div><div class="sw-site">' + escHtml(url || '') + '</div>' +
+      '<div class="muted">' + (shown.length ? shown.length + ' problem' + (shown.length === 1 ? '' : 's') + ' found' : 'No problems found') + '</div></div>' +
+    '<div class="sw-risk">' + swStatusTag(r.status) +
+      '<span class="sw-meter ' + tone + '"><span style="width:' + Math.max(3, Math.min(100, r.score)) + '%"></span></span>' +
+      'risk ' + r.score + '/100</div></div>';
+  const sev = {critical: 'invalid', high: 'invalid', medium: 'risky'};
+  const list = shown.length ? '<ul class="sw-findings">' + shown.map(f =>
+      '<li><span class="email-tag ' + (sev[f.severity] || 'guess') + '">' + escHtml(f.severity) + '</span><div>' +
+      '<div class="t">' + escHtml(f.title) + ' <span class="w">' + escHtml(f.where) + '</span></div>' +
+      (f.plain && f.plain !== f.title ? '<div class="p">' + escHtml(f.plain) + '</div>' : '') + '</div></li>').join('') + '</ul>'
+    : '<div class="sw-clean">' + icon('check') + ' The site looks clean. Harvey won\'t mention a scan in emails to it.</div>';
+  const audits = SW_AUDITS.map(([k, label]) => swAuditHtml(r[k], label)).join('');
+  const basic = swBasicUrl(r.report_url);
+  const foot = basic
+    ? '<div class="sw-result-foot"><span class="muted">Anyone with this link can open the reports (Basic and Advanced tabs), no login needed.</span>' +
+      '<a class="btn btn-secondary btn-sm" href="' + safeHref(basic) + '" target="_blank" rel="noopener noreferrer">Reports ' + icon('arrow') + '</a></div>' : '';
+  return '<div class="sw-result">' + head + list + audits + foot + '</div>';
+}
+
+// One of the scan's separate reports (UI or SEO): score, findings, its own link.
+function swAuditHtml(a, label) {
+  if (!a) return '';
+  const tone = {good: 'verified', fair: 'risky', poor: 'invalid'}[a.grade] || 'guess';
+  const shown = (a.findings || []).filter(f => f.severity !== 'info');
+  const sev = {high: 'invalid', medium: 'risky'};
+  return '<div class="sw-audit-block"><div class="sw-result-head"><div><div class="sw-site">' + escHtml(label) + ' report</div>' +
+      '<div class="muted">' + (shown.length ? shown.length + ' improvement' + (shown.length === 1 ? '' : 's') : 'Nothing to fix') + '</div></div>' +
+    '<div class="sw-risk"><span class="email-tag ' + tone + '">' + escHtml(a.grade || '') + '</span> ' + escHtml(String(a.score)) + '/100' +
+      '</div></div>' +
+    (shown.length ? '<ul class="sw-findings">' + shown.map(f =>
+      '<li><span class="email-tag ' + (sev[f.severity] || 'guess') + '">' + escHtml(f.severity) + '</span><div>' +
+      '<div class="t">' + escHtml(f.title) + ' <span class="w">' + escHtml(f.where) + '</span></div>' +
+      (f.plain && f.plain !== f.title ? '<div class="p">' + escHtml(f.plain) + '</div>' : '') + '</div></li>').join('') + '</ul>' : '') +
+    '</div>';
+}
+
+async function scanSitewatch() {
+  const url = document.getElementById('sw-scan-url').value.trim();
+  const out = document.getElementById('sw-scan-result');
+  if (!url) { showToast('Enter a website address first.', 'error'); return; }
+  if (_swPoll) clearTimeout(_swPoll);
+  if (_swTick) clearInterval(_swTick);
+  const btn = document.getElementById('sw-scan-btn');
+  const input = document.getElementById('sw-scan-url');
+  const busy = on => {
+    btn.disabled = on; input.disabled = on;
+    btn.innerHTML = on ? '<span class="spinner" aria-hidden="true"></span>Scanning…' : 'Scan';
+    if (!on && _swTick) { clearInterval(_swTick); _swTick = null; }
+  };
+  busy(true);
+  const began = Date.now();
+  let state = 'starting';
+  const label = {starting: 'Asking SiteWatch to scan', queued: 'Waiting in SiteWatch\'s queue', running: 'Scanning the website'};
+  const draw = () => {
+    const secs = Math.floor((Date.now() - began) / 1000);
+    const clock = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    const hint = state === 'queued' && secs >= 60
+      ? '<div class="sw-hint">Still waiting to start. Is SiteWatch\'s queue worker running? (<code>php artisan queue:work</code>, or its cron URL on the live site)</div>' : '';
+    out.innerHTML = '<div class="sw-loading" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div>' +
+      '<b>' + escHtml(label[state] || 'Scanning') + '…</b>' +
+      '<span class="muted">' + escHtml(url) + ' · ' + clock + ' · a scan usually takes a minute or two</span>' + hint + '</div></div>';
+  };
+  draw();
+  _swTick = setInterval(draw, 1000);
+  const start = await api('/api/sitewatch/scan', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url})});
+  if (!start || !start.success) {
+    busy(false);
+    out.innerHTML = '<p class="error-text">' + escHtml((start && start.message) || 'Couldn\'t start the scan.') + '</p>';
+    return;
+  }
+  state = start.state;
+  const poll = async () => {
+    const r = await api('/api/sitewatch/scans/' + start.scan_id);
+    if (r && r.success && r.done) {
+      busy(false);
+      out.innerHTML = r.state === 'completed' ? swFindingsHtml(r, url)
+        : '<p class="error-text">The scan ' + escHtml(r.state) + (r.error ? ': ' + escHtml(r.error) : '') + '</p>';
+      loadSitewatch(false);
+      return;
+    }
+    if (r && !r.success) { busy(false); out.innerHTML = '<p class="error-text">' + escHtml(r.message) + '</p>'; return; }
+    if (Date.now() - began >= 10 * 60000) {
+      busy(false);
+      out.innerHTML = '<p class="error-text">Still not finished after 10 minutes. SiteWatch needs its queue worker (php artisan queue:work) or cron URL running. ' +
+        'The scan stays queued, so you can click Scan again later to check.</p>';
+      return;
+    }
+    if (r && r.state) { state = r.state; draw(); }
+    _swPoll = setTimeout(poll, 5000);
+  };
+  poll();
 }
 
 // ── Settings ──
@@ -2209,7 +2718,26 @@ function companyInfoCard(company, profile) {
   ).join('<br>');
   const people = by('DECISION_MAKER_TITLE').length ? by('DECISION_MAKER_TITLE') : by('CONTACT_FOUND');
   const form = by('CONTACT_FORM_URL')[0];
-  const shown = new Set(['DECISION_MAKER_TITLE', 'CONTACT_FOUND', 'CONTACT_FORM_URL', 'HIRING_ROLE', 'FOUND_IN_SERP', 'TECH_STACK']);
+  // Latest SiteWatch scan (observations come newest first)
+  const swIssues = obs.find(o => o.signal_code === 'SITEWATCH_ISSUES');
+  const swStatus = obs.find(o => o.signal_code === 'SITEWATCH_STATUS');
+  const swReport = (swIssues && swIssues.evidence_url) || (swStatus && swStatus.evidence_url) || '';
+  const sitewatch = (swIssues || swStatus)
+    ? (swStatus ? '<b>' + escHtml(swStatus.value_text || '') + '</b>' +
+        (swStatus.value_num !== null ? ' (risk ' + escHtml(String(swStatus.value_num)) + '/100)' : '') : '') +
+      (swIssues ? (swStatus ? ' · ' : '') + escHtml(String(swIssues.value_num || 0)) + ' issue(s)' +
+        (swIssues.value_text ? '<br>' + escHtml(swIssues.value_text) : '') : '') +
+      (swReport ? '<br>' + link(swBasicUrl(swReport), 'Reports') : '')
+    : '';
+  // The scan's separate UI and SEO reports
+  const swAudit = (code, label) => {
+    const o = obs.find(x => x.signal_code === code);
+    if (!o) return '';
+    return '<b>' + escHtml(String(o.value_num || 0)) + '</b> problem(s)' + (o.value_text ? '<br>' + escHtml(o.value_text) : '') +
+      '';
+  };
+  const shown = new Set(['DECISION_MAKER_TITLE', 'CONTACT_FOUND', 'CONTACT_FORM_URL', 'HIRING_ROLE', 'FOUND_IN_SERP', 'TECH_STACK',
+    'SITEWATCH_ISSUES', 'SITEWATCH_STATUS', 'SITEWATCH_UI_ISSUES', 'SITEWATCH_SEO_ISSUES']);
   const other = Object.values(latest).filter(o => !shown.has(o.signal_code));
   let html = '<div class="card" style="margin-bottom:16px"><div class="card-head"><h3>' + escHtml(c.name || c.domain) + '</h3>' +
     '<span class="meta">' + (typeof company.fit === 'number' ? 'Fit ' + company.fit + ' / 100' : '') + '</span></div>' +
@@ -2224,6 +2752,9 @@ function companyInfoCard(company, profile) {
     row('Contact form', form ? link(form.value_text, form.value_text) : '') +
     row('Hiring', list(by('HIRING_ROLE'), 6)) +
     row('Tech on website', escHtml(by('TECH_STACK').map(o => o.value_text).slice(0, 1).join(''))) +
+    row('Website issues', sitewatch) +
+    row('Responsive &amp; UI (SiteWatch)', swAudit('SITEWATCH_UI_ISSUES', 'responsive & UI')) +
+    row('SEO (SiteWatch)', swAudit('SITEWATCH_SEO_ISSUES', 'SEO')) +
     row('Other signals', other.slice(0, 8).map(o => escHtml(o.label) + ': ' +
       escHtml(o.value_text || String(o.value_num))).join('<br>')) +
     row('Found via', c.source_url ? link(c.source_url, 'search result') + ' · ' + escHtml(c.source || '') : escHtml(c.source || '')) +
@@ -2921,6 +3452,298 @@ async function loadLeadRequest() {
   if (d.running && currentTab === 'leads') _leadPoll = setTimeout(loadLeadRequest, 4000);
 }
 
+// ── Leads: what Harvey found, approved before it writes ──
+
+let _foundLeads = [];
+let _foundCounts = {};
+let _foundTab = 'pending';
+let _foundType = '';
+let _foundSort = 'type';
+let _foundQuery = '';
+const _foundSelected = new Set();
+const FOUND_TABS = [['pending', 'Waiting for approval'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['all', 'All']];
+
+let _foundSyncTimer = null;
+let _foundSyncing = false;
+
+// Ask SiteWatch about approved leads (send new ones, read back finished
+// scans), then redraw if anything changed. Repeats while scans are running.
+async function syncFoundReports() {
+  clearTimeout(_foundSyncTimer);
+  if (_foundSyncing) return;
+  _foundSyncing = true;
+  const r = await api('/api/sitewatch/sync', {method: 'POST'});
+  _foundSyncing = false;
+  if (r && r.active && (r.requested || r.observed)) await loadFoundLeads(true);
+  const scanning = _foundLeads.some(l => l.report && l.report.state === 'pending');
+  if (r && r.active && scanning && currentTab === 'found') _foundSyncTimer = setTimeout(syncFoundReports, 10000);
+}
+
+async function loadFoundLeads(skipSync) {
+  const el = document.getElementById('found-list');
+  const d = await api('/api/leads/found');
+  if (!d) { el.innerHTML = offlineState(); return; }
+  _foundLeads = d.leads || [];
+  _foundCounts = d.counts || {};
+  const ids = new Set(_foundLeads.map(l => l.id));
+  [..._foundSelected].forEach(id => { if (!ids.has(id)) _foundSelected.delete(id); });
+  navCount('nav-found', _foundLeads.filter(l => l.approval === 'pending' && l.status === 'new').length);
+  renderFoundLeads();
+  if (!skipSync) syncFoundReports();
+}
+
+function foundReportCell(l) {
+  const r = l.report;
+  if (l.approval !== 'approved') return '<span class="muted">After approval</span>';
+  if (!r) return '<span class="muted">Not sent yet</span>';
+  const id = jsq(l.id);
+  const fix = '<div class="found-report-actions"><button class="btn btn-ghost btn-sm" onclick="leadReport([' + id + '], \'rescan\')">Scan again</button>' +
+    '<button class="btn btn-ghost btn-sm" onclick="leadReport([' + id + '], \'skip\')">Write without report</button></div>';
+  if (r.state === 'pending') return '<span class="email-tag guess"><span class="spinner" aria-hidden="true" style="width:10px;height:10px;margin-right:4px"></span>scanning</span>' + fix;
+  if (r.state === 'failed') return '<span class="email-tag invalid" title="' + escHtml(r.error || '') + '">scan failed</span>' + fix;
+  if (r.state === 'skipped') return '<span class="email-tag guess" title="You chose to write without a report">no report (your choice)</span>';
+  const status = r.status || '';
+  const tag = '<span class="email-tag ' + ({clean: 'verified', review: 'risky', critical: 'invalid'}[status] || 'guess') + '">' + escHtml(status || 'done') + '</span>';
+  const issues = r.issues ? '<div class="muted">' + r.issues + ' problem' + (r.issues === 1 ? '' : 's') + '</div>' : '';
+  const links = swReportLinks(r, r.report_url);
+  return tag + issues + (links ? '<div>' + links + '</div>' : '');
+}
+
+function _foundSelectedIds() { return [..._foundSelected]; }
+
+function _foundVisible() {
+  const q = _foundQuery.trim().toLowerCase();
+  let rows = _foundLeads.filter(l =>
+    (_foundTab === 'all' || l.approval === _foundTab) &&
+    (!_foundType || l.business_type === _foundType) &&
+    (!q || [l.company, l.first_name, l.last_name, l.email, l.domain, l.business_type].join(' ').toLowerCase().includes(q)));
+  const by = {
+    type: (a, b) => a.business_type.localeCompare(b.business_type) || String(a.company || '').localeCompare(String(b.company || '')),
+    company: (a, b) => String(a.company || '').localeCompare(String(b.company || '')),
+    newest: (a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')),
+  }[_foundSort];
+  return rows.sort(by);
+}
+
+const FOUND_PER_PAGE = 15;
+const _foundOpen = new Set();      // leads whose details are open
+const _foundDetails = {};          // id -> details from the server
+const _foundPreview = {};          // id -> previewed email
+let _foundPage = 0;
+
+// Any change to what is shown starts again at page 1.
+function foundFiltersChanged() { _foundPage = 0; renderFoundLeads(); }
+
+function foundGoPage(page) { _foundPage = page; renderFoundLeads(); window.scrollTo({top: 0}); }
+
+function renderFoundLeads() {
+  document.getElementById('found-tabs').innerHTML = FOUND_TABS.map(([k, label]) =>
+    '<button class="' + (k === _foundTab ? 'on' : '') + '" aria-pressed="' + (k === _foundTab) + '" onclick="_foundTab=\'' + k +
+    '\'; _foundSelected.clear(); _foundPage = 0; renderFoundLeads()">' + label + ' <span class="n">' +
+    (k === 'all' ? _foundLeads.length : (_foundCounts[k] || 0)) + '</span></button>').join('');
+
+  // Business types in this tab, with how many leads each has.
+  const inTab = _foundLeads.filter(l => _foundTab === 'all' || l.approval === _foundTab);
+  const types = {};
+  inTab.forEach(l => { types[l.business_type] = (types[l.business_type] || 0) + 1; });
+  const typeSel = document.getElementById('found-type');
+  if (_foundType && !types[_foundType]) _foundType = '';
+  typeSel.innerHTML = '<option value="">All business types (' + inTab.length + ')</option>' +
+    Object.keys(types).sort().map(t => '<option value="' + escHtml(t) + '"' + (t === _foundType ? ' selected' : '') + '>' +
+      escHtml(t) + ' (' + types[t] + ')</option>').join('');
+  document.getElementById('found-sort').value = _foundSort;
+
+  const rows = _foundVisible();
+  const bulk = document.getElementById('found-bulk');
+  bulk.hidden = !_foundSelected.size;
+  document.getElementById('found-selected').textContent = _foundSelected.size + ' selected';
+
+  const el = document.getElementById('found-list');
+  if (!_foundLeads.length) {
+    el.innerHTML = '<div class="table-card">' + emptyState(icon('check'), 'No leads yet',
+      'Set up who you want to reach in <b>Lead settings</b>. The leads Harvey finds show up here for you to approve.') + '</div>';
+    return;
+  }
+  if (!rows.length) {
+    el.innerHTML = '<div class="table-card">' + emptyState(icon('check'),
+      _foundTab === 'pending' && !_foundQuery && !_foundType ? 'Nothing waiting for approval' : 'No matches',
+      _foundTab === 'pending' && !_foundQuery && !_foundType ? 'New leads Harvey finds will wait here for your yes.' : 'No lead matches that search and filter.') + '</div>';
+    return;
+  }
+
+  const pages = Math.max(1, Math.ceil(rows.length / FOUND_PER_PAGE));
+  _foundPage = Math.min(Math.max(0, _foundPage), pages - 1);
+  const start = _foundPage * FOUND_PER_PAGE;
+  const pageRows = rows.slice(start, start + FOUND_PER_PAGE);
+  const allOn = pageRows.every(l => _foundSelected.has(l.id));
+  const emailTag = s => {
+    const cls = {verified: 'verified', risky: 'risky', invalid: 'invalid'}[s] || 'guess';
+    return s ? '<span class="email-tag ' + cls + '">' + escHtml(s) + '</span>' : '';
+  };
+  const approvalTag = a => '<span class="email-tag ' + ({approved: 'verified', rejected: 'invalid', pending: 'risky'}[a] || 'guess') + '">' +
+    ({approved: 'approved', rejected: 'rejected', pending: 'waiting'}[a] || escHtml(a)) + '</span>';
+  const actions = l => {
+    const id = jsq(l.id);
+    if (l.approval === 'pending') return '<button class="btn btn-primary btn-sm" onclick="setFoundApproval([' + id + '], \'approved\')">Approve</button>' +
+      '<button class="btn btn-secondary btn-sm" onclick="setFoundApproval([' + id + '], \'rejected\')">Reject</button>';
+    if (l.approval === 'approved' && l.status !== 'new') return '<span class="muted">' + escHtml(l.status) + '</span>';
+    return '<button class="btn btn-ghost btn-sm" onclick="setFoundApproval([' + id + '], \'pending\')">Undo</button>';
+  };
+
+  let html = '<div class="table-card"><table class="found-table"><thead><tr>' +
+    '<th class="found-check"><input type="checkbox" aria-label="Select all shown" ' + (allOn ? 'checked' : '') + ' onchange="foundSelectAll(this.checked)"></th>' +
+    '<th>Company</th><th>Contact</th><th>Email</th><th>Location</th><th>Status</th><th>Website report</th><th class="found-actions-h"></th></tr></thead><tbody>';
+  let group = null;
+  pageRows.forEach(l => {
+    if (_foundSort === 'type' && l.business_type !== group) {
+      group = l.business_type;
+      const n = rows.filter(r => r.business_type === group).length;
+      html += '<tr class="found-group"><td colspan="8">' + escHtml(group) + ' <span class="muted">' + n + '</span></td></tr>';
+    }
+    const site = l.website || (l.domain ? 'https://' + l.domain : '');
+    const name = [l.first_name, l.last_name].filter(Boolean).join(' ');
+    html += '<tr class="' + (_foundSelected.has(l.id) ? 'sel' : '') + '">' +
+      '<td class="found-check"><input type="checkbox" aria-label="Select" ' + (_foundSelected.has(l.id) ? 'checked' : '') +
+        ' onchange="foundSelect(' + jsq(l.id) + ', this.checked)"></td>' +
+      '<td><b>' + escHtml(l.company || '—') + '</b>' +
+        (safeHref(site) ? '<div><a class="muted" href="' + safeHref(site) + '" target="_blank" rel="noopener noreferrer">' + escHtml(l.domain || site) + '</a></div>' : '') +
+        (_foundSort !== 'type' ? '<div class="muted">' + escHtml(l.business_type) + '</div>' : '') + '</td>' +
+      '<td>' + (name ? escHtml(name) : '<span class="muted">Company inbox</span>') +
+        (l.title ? '<div class="muted">' + escHtml(l.title) + '</div>' : '') + '</td>' +
+      '<td>' + escHtml(l.email || '') + ' ' + emailTag(l.email_status) + '</td>' +
+      '<td class="muted">' + escHtml(l.location || '') + '</td>' +
+      '<td>' + approvalTag(l.approval) + '</td>' +
+      '<td class="found-report">' + foundReportCell(l) + '</td>' +
+      '<td class="found-actions">' + actions(l) +
+        '<button class="btn btn-ghost btn-sm" onclick="toggleFoundDetails(' + jsq(l.id) + ')">' + (_foundOpen.has(l.id) ? 'Hide' : 'Details') + '</button></td></tr>';
+    if (_foundOpen.has(l.id)) html += '<tr class="found-detail-row"><td colspan="8">' + foundDetailsHtml(l) + '</td></tr>';
+  });
+  const pager = pages > 1
+    ? '<div class="found-pager"><button class="btn btn-ghost btn-sm" ' + (_foundPage === 0 ? 'disabled ' : '') +
+        'onclick="foundGoPage(' + (_foundPage - 1) + ')">&larr; Prev</button>' +
+      '<span>Page ' + (_foundPage + 1) + ' of ' + pages + '</span>' +
+      '<button class="btn btn-ghost btn-sm" ' + (_foundPage >= pages - 1 ? 'disabled ' : '') +
+        'onclick="foundGoPage(' + (_foundPage + 1) + ')">Next &rarr;</button></div>'
+    : '';
+  el.innerHTML = html + '</tbody></table></div><div class="table-foot found-foot"><span>' + (start + 1) + '–' + (start + pageRows.length) +
+    ' of ' + rows.length + ' lead' + (rows.length === 1 ? '' : 's') + '</span>' + pager + '</div>';
+}
+
+async function toggleFoundDetails(id) {
+  if (_foundOpen.has(id)) { _foundOpen.delete(id); renderFoundLeads(); return; }
+  _foundOpen.add(id);
+  renderFoundLeads();
+  if (!_foundDetails[id]) {
+    const d = await api('/api/leads/' + encodeURIComponent(id) + '/details');
+    _foundDetails[id] = d && d.success ? d : {error: (d && d.message) || 'Could not load the details.'};
+    renderFoundLeads();
+  }
+}
+
+async function previewFoundMessage(id) {
+  _foundPreview[id] = {loading: true};
+  renderFoundLeads();
+  const r = await api('/api/email-template/preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({prospect_id: id})});
+  _foundPreview[id] = r && r.success ? {subject: r.subject, body: r.body} : {error: (r && r.message) || 'Could not write a preview.'};
+  renderFoundLeads();
+}
+
+function foundDetailsHtml(l) {
+  const d = _foundDetails[l.id];
+  if (!d) return '<div class="found-detail muted"><span class="spinner" aria-hidden="true"></span> Loading…</div>';
+  if (d.error) return '<div class="found-detail error-text">' + escHtml(d.error) + '</div>';
+  const pu = d.purpose || {}, ne = d.needs || {};
+  const li = items => items.filter(Boolean).map(x => '<li>' + x + '</li>').join('');
+  const why = li([
+    pu.request_summary || pu.your_request ? '<b>Your requirement:</b> ' + escHtml(pu.request_summary || pu.your_request) : '',
+    pu.business_type ? '<b>Business type:</b> ' + escHtml(pu.business_type) : '',
+    pu.found_via ? '<b>Found via:</b> ' + escHtml(pu.found_via) +
+      (safeHref(pu.found_url) ? ' (<a href="' + safeHref(pu.found_url) + '" target="_blank" rel="noopener noreferrer">source</a>)' : '') : '',
+    typeof pu.fit === 'number' ? '<b>Fit:</b> ' + pu.fit + '/100' + ((pu.fit_reasons || []).length ? ' · ' + escHtml(pu.fit_reasons.join(' · ')) : '') : '',
+  ]) || '<li class="muted">Nothing recorded.</li>';
+  const needs = li([
+    ne.about ? '<b>About them:</b> ' + escHtml(ne.about) : '',
+    ...(ne.website_problems || []).map(x => '<b>Website:</b> ' + escHtml(x)),
+    ne.hiring ? '<b>Hiring:</b> ' + escHtml(ne.hiring) : '',
+    ne.notes ? '<b>Notes:</b> ' + escHtml(ne.notes) : '',
+    ...(ne.signals || []).slice(0, 6).map(s => '<b>' + escHtml(s.label) + ':</b> ' + escHtml(s.value)),
+  ]) || '<li class="muted">Nothing known yet. Harvey learns more when it reads their website and SiteWatch scans it.</li>';
+  let msg;
+  if ((d.messages || []).length) {
+    msg = d.messages.map(m => '<div class="found-msg"><div class="found-msg-head"><b>Email ' + escHtml(String(m.step || 1)) +
+      (m.kind === 'reply' ? ' (reply)' : '') + '</b> <span class="email-tag ' +
+      ({sent: 'verified', approved: 'verified', pending_review: 'risky', rejected: 'invalid', cancelled: 'guess'}[m.status] || 'guess') + '">' +
+      escHtml(String(m.status || '').replace('_', ' ')) + '</span></div>' +
+      '<div class="found-msg-subject">' + escHtml(m.subject || '') + '</div><pre class="found-msg-body">' + escHtml(m.body || '') + '</pre></div>').join('');
+  } else {
+    const pv = _foundPreview[l.id];
+    msg = '<p class="muted">No email written yet. Harvey writes it after you approve the lead and its website report is ready.</p>' +
+      (pv && pv.loading ? '<p class="muted"><span class="spinner" aria-hidden="true"></span> Writing a preview…</p>'
+       : pv && pv.error ? '<p class="error-text">' + escHtml(pv.error) + '</p>'
+       : pv ? '<div class="found-msg"><div class="found-msg-head"><b>Preview</b> <span class="email-tag guess">not saved, not sent</span></div>' +
+              '<div class="found-msg-subject">' + escHtml(pv.subject) + '</div><pre class="found-msg-body">' + escHtml(pv.body) + '</pre></div>'
+       : '') +
+      (!(pv && pv.loading) ? '<button class="btn btn-secondary btn-sm" onclick="previewFoundMessage(' + jsq(l.id) + ')">' +
+        (pv && !pv.error ? 'Preview again' : 'Preview message') + '</button>' : '');
+  }
+  return '<div class="found-detail"><div><h4>Why this lead</h4><ul>' + why + '</ul></div>' +
+    '<div><h4>What they need</h4><ul>' + needs + '</ul></div>' +
+    '<div><h4>Message</h4>' + msg + '</div></div>';
+}
+
+function foundSelect(id, on) { on ? _foundSelected.add(id) : _foundSelected.delete(id); renderFoundLeads(); }
+
+function foundSelectAll(on) {
+  _foundVisible().slice(_foundPage * FOUND_PER_PAGE, (_foundPage + 1) * FOUND_PER_PAGE)
+    .forEach(l => on ? _foundSelected.add(l.id) : _foundSelected.delete(l.id));
+  renderFoundLeads();
+}
+
+async function setFoundApproval(ids, approval) {
+  if (!ids.length) return;
+  if (approval === 'rejected' && ids.length > 1 && !confirm('Reject ' + ids.length + ' leads? Harvey will never email them.')) return;
+  const r = await api('/api/leads/approval', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids, approval})});
+  showToast((r && r.message) || 'Couldn\'t change that.', r && r.success ? 'success' : 'error');
+  ids.forEach(id => _foundSelected.delete(id));
+  loadFoundLeads();
+}
+
+async function leadReport(ids, action) {
+  const r = await api('/api/leads/report', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids, action})});
+  showToast((r && r.message) || 'Could not do that.', r && r.success ? 'success' : 'error');
+  loadFoundLeads();
+}
+
+let _campaignPoll = null;
+
+async function createCampaign(ids) {
+  if (!ids.length) return;
+  const btn = document.getElementById('found-create-btn');
+  const r = await api('/api/campaigns/create', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids})});
+  if (!r || !r.success) { showToast((r && r.message) || 'Could not start the campaign.', 'error'); return; }
+  const skipped = Object.entries(r.skipped || {}).map(([k, v]) => v + ' ' + k).join(', ');
+  showToast(r.message + (skipped ? ' Skipped: ' + skipped + '.' : ''), 'success');
+  _foundSelected.clear(); renderFoundLeads();
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>Writing…'; }
+  clearTimeout(_campaignPoll);
+  const poll = async () => {
+    const st = await api('/api/campaigns/create');
+    if (st && st.running) { _campaignPoll = setTimeout(poll, 4000); return; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Create campaign'; }
+    const rep = (st && st.report) || {};
+    if (rep.error) showToast('Writing failed: ' + rep.error, 'error');
+    else showToast('Campaign written for ' + (rep.written || 0) + ' of ' + (rep.requested || 0) + ' leads. ' +
+      ((rep.written || 0) < (rep.requested || 0) ? 'Harvey writes up to 8 per business type at a time; run it again for the rest. ' : '') +
+      'Drafts wait in the Outbox for your approval.', rep.written ? 'success' : 'error');
+    loadFoundLeads();
+  };
+  _campaignPoll = setTimeout(poll, 4000);
+}
+
 // ── Per-conversation reply mode (dropdown in the chat header) ──
 
 async function setReplyMode(convoId, mode) {
@@ -2996,24 +3819,111 @@ async function setConvoStatus(id, status) {
   loadToday();
 }
 
+// ── Activity: what happened, filtered, with the noise folded away ──
+
+let _activity = [];
+let _activitySummary = {};
+let _activityFilter = 'all';
+let _activityQuery = '';
+let _activityCheckins = false;
+
+const ACTIVITY_FILTERS = [['all', 'All'], ['emails', 'Emails'], ['replies', 'Replies'], ['leads', 'Leads'],
+                          ['you', 'By you'], ['problems', 'Problems']];
+const AGENT_NAMES = {scout: 'Lead finder', writer: 'Writer', sender: 'Sender', handler: 'Replies',
+                     analyst: 'Analyst', dashboard: 'You', user: 'You', main: 'Harvey'};
+
+function activityKind(a) {
+  const t = a.action_type;
+  if (['bounce', 'write_failed', 'escalation', 'reply_after_opt_out'].includes(t)) return 'problems';
+  if (['email_sent', 'stage_campaign', 'write_campaign', 'send_campaign', 'outbox_edited', 'manual_send', 'manual_send_undone'].includes(t)) return 'emails';
+  if (['reply', 'reply_queued', 'manual_reply', 'conversation_status', 'conversation_reply_mode', 'opt_out', 'opt_out_undone'].includes(t)) return 'replies';
+  if (['prospect', 'lead_approval'].includes(t)) return 'leads';
+  return 'other';
+}
+
+// Check-ins and "searched, nothing new" are routine: shown dimmed, and a run
+// of them folds into one line.
+function activityQuiet(a) {
+  return a.agent === 'main' || (a.action_type === 'prospect' && !Number((a.details || {}).prospects_found));
+}
+
+function activityMatches(a) {
+  const byYou = a.agent === 'dashboard' || a.agent === 'user';
+  if (_activityFilter === 'you' && !byYou) return false;
+  if (!['all', 'you'].includes(_activityFilter) && activityKind(a) !== _activityFilter) return false;
+  const q = _activityQuery.trim().toLowerCase();
+  if (!q) return true;
+  const d = a.details || {};
+  return [actionText(a).replace(/<[^>]+>/g, ''), a.action_type, a.agent, d.prospect_email, d.prospect, d.campaign_name]
+    .join(' ').toLowerCase().includes(q);
+}
+
 async function loadActivity() {
   const el = document.getElementById('activity-list');
-  const data = await api('/api/activity');
+  const box = document.getElementById('activity-checkins');
+  if (box) box.checked = _activityCheckins;
+  const data = await api('/api/activity/feed?checkins=' + (_activityCheckins ? 'true' : 'false'));
   if (!data) { el.innerHTML = offlineState(); return; }
-  if (!data.length) {
-    el.innerHTML = emptyState(icon('activity'), 'No activity yet',
-      'Harvey hasn\'t taken any actions. Every prospect found, email written, and reply handled will appear here the moment it happens.');
+  _activity = data.items || [];
+  _activitySummary = data.summary || {};
+  renderActivity();
+}
+
+function renderActivity() {
+  const s = _activitySummary;
+  const tile = (label, value, note, tone) => '<div class="kpi"><div class="kpi-label">' + label + '</div>' +
+    '<div class="kpi-value' + (value ? '' : ' zero') + (tone && value ? ' ' + tone : '') + '">' + (value || 0) + '</div>' +
+    '<div class="kpi-note">' + note + '</div></div>';
+  const last = s.last_checkin ? dayLabel(s.last_checkin) + ', ' + timeOfDay(s.last_checkin) : 'never';
+  document.getElementById('activity-kpis').innerHTML =
+    tile('New contacts found', s.leads_found, 'last 7 days') +
+    tile('Emails sent', s.emails_sent, 'last 7 days') +
+    tile('Replies handled', s.replies, 'last 7 days') +
+    tile('Problems', s.problems, 'bounces, failed drafts, flagged · 7 days', 'act-bad') +
+    '';
+  document.getElementById('activity-filters').innerHTML = ACTIVITY_FILTERS.map(([k, label]) => {
+    const count = k === 'all' ? _activity.length
+      : _activity.filter(a => k === 'you' ? (a.agent === 'dashboard' || a.agent === 'user') : activityKind(a) === k).length;
+    return '<button class="' + (k === _activityFilter ? 'on' : '') + '" aria-pressed="' + (k === _activityFilter) +
+      '" onclick="_activityFilter=\'' + k + '\'; renderActivity()">' + label + ' <span class="n">' + count + '</span></button>';
+  }).join('');
+
+  const el = document.getElementById('activity-list');
+  const rows = _activity.filter(activityMatches);
+  const lastLine = '<div class="activity-last">' + icon('refresh') + ' Harvey last checked in: <b>' + escHtml(last) + '</b>' +
+    (s.checkins_week ? ' · ' + s.checkins_week + ' check-ins in the last 7 days' : '') + '</div>';
+  if (!rows.length) {
+    el.innerHTML = lastLine + '<div class="card">' + emptyState(icon('activity'),
+      _activity.length ? 'Nothing matches' : 'No activity yet',
+      _activity.length ? 'Try another filter or search.' :
+      'Leads found, emails written and sent, and replies show up here the moment they happen.') + '</div>';
     return;
   }
-  let html = '<div class="card"><div class="timeline">';
+
+  let html = lastLine + '<div class="card"><div class="timeline">';
   let day = '';
-  for (const a of data) {
+  for (let i = 0; i < rows.length; i++) {
+    const a = rows[i];
     const label = dayLabel(a.created_at);
     if (label !== day) { day = label; html += '<div class="tl-day">' + escHtml(label) + '</div>'; }
-    html += '<div class="tl-item' + (a.agent === 'main' ? ' quiet' : '') + '"><span class="tl-time">' + timeOfDay(a.created_at) + '</span>' +
-      '<span class="tl-icon">' + icon(own(AGENT_ICONS, a.agent) || 'activity') + '</span>' +
+    // Fold a run of routine entries on the same day into one line.
+    if (activityQuiet(a)) {
+      let j = i;
+      while (j + 1 < rows.length && activityQuiet(rows[j + 1]) && dayLabel(rows[j + 1].created_at) === label) j++;
+      if (j > i) {
+        html += '<div class="tl-item quiet act-fold"><span class="tl-time">' + timeOfDay(rows[j].created_at) + '</span>' +
+          '<span class="tl-icon">' + icon('refresh') + '</span>' +
+          '<span class="tl-text">Routine checks ×' + (j - i + 1) + ' · ' + timeOfDay(rows[j].created_at) + '–' + timeOfDay(a.created_at) +
+          ', nothing new</span><span class="tl-agent">Harvey</span></div>';
+        i = j;
+        continue;
+      }
+    }
+    const kind = activityKind(a);
+    html += '<div class="tl-item act-' + kind + (activityQuiet(a) ? ' quiet' : '') + '"><span class="tl-time">' + timeOfDay(a.created_at) + '</span>' +
+      '<span class="tl-icon">' + icon(own(AGENT_ICONS, a.agent) || (a.agent === 'dashboard' ? 'contacts' : 'activity')) + '</span>' +
       '<span class="tl-text">' + actionText(a) + '</span>' +
-      '<span class="tl-agent">' + escHtml(a.agent) + '</span></div>';
+      '<span class="tl-agent">' + escHtml(own(AGENT_NAMES, a.agent) || a.agent) + '</span></div>';
   }
   el.innerHTML = html + '</div></div>';
 }
@@ -3068,6 +3978,6 @@ setInterval(() => {
     case 'conversations': if (!replyInProgress()) loadConversations(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
-    case 'controls': loadLogs(); break;
+    case 'leads': if (_leadsPane === 'controls') loadLogs(); break;
   }
 }, 15000);

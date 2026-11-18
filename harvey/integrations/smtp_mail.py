@@ -64,6 +64,29 @@ class _IMAP4_SSL(imaplib.IMAP4_SSL):
         raise last or OSError(f"can't connect to {self.host}")
 
 
+def _connect_ipv4_first(host: str, port: int, timeout: float = 15) -> socket.socket:
+    """A connected TCP socket to host:port, IPv4 addresses first.
+
+    The SMTP half of _IMAP4_SSL's fix: on a network with a dead IPv6 route,
+    aiosmtplib tried that address first and timed out, so no email could be
+    sent at all. TLS (STARTTLS or implicit) still verifies the real hostname,
+    which the caller passes to aiosmtplib alongside this socket."""
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    infos.sort(key=lambda i: i[0] != socket.AF_INET)
+    last = None
+    for family, kind, proto, _, addr in infos:
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(timeout)
+            sock.connect(addr)
+            sock.setblocking(False)  # asyncio takes it from here
+            return sock
+        except OSError as e:
+            sock.close()
+            last = e
+    raise last or OSError(f"can't connect to {host}")
+
+
 class SmtpImapProvider(MailProvider):
     name = "smtp"
 
@@ -111,10 +134,12 @@ class SmtpImapProvider(MailProvider):
         set_body(msg, body, sig)
 
         try:
+            sock = await asyncio.get_running_loop().run_in_executor(
+                None, _connect_ipv4_first, self.smtp_host, self.smtp_port, 30)
             await aiosmtplib.send(
                 msg,
-                hostname=self.smtp_host,
-                port=self.smtp_port,
+                hostname=self.smtp_host,  # TLS verifies this name
+                sock=sock,
                 username=self.smtp_user,
                 password=self.smtp_pass,
                 start_tls=(self.smtp_port == 587),
@@ -275,8 +300,10 @@ class SmtpImapProvider(MailProvider):
             return False, "SMTP_HOST / SMTP_USERNAME / SMTP_PASSWORD missing from .env"
         # SMTP handshake
         try:
+            sock = await asyncio.get_running_loop().run_in_executor(
+                None, _connect_ipv4_first, self.smtp_host, self.smtp_port, 15)
             smtp = aiosmtplib.SMTP(
-                hostname=self.smtp_host, port=self.smtp_port,
+                hostname=self.smtp_host, sock=sock,
                 start_tls=(self.smtp_port == 587),
                 use_tls=(self.smtp_port == 465), timeout=15,
             )

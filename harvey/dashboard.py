@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -413,7 +414,7 @@ async def save_env_settings(request: Request):
                      "IMAP_HOST", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD",
                      "M365_CLIENT_ID", "M365_TENANT_ID",
                      "REOON_API_KEY", "ZEROBOUNCE_API_KEY", "HUNTER_API_KEY",
-                     "TINYFISH_API_KEY"]:
+                     "TINYFISH_API_KEY", "SITEWATCH_URL", "SITEWATCH_API_TOKEN"]:
             if key in data and data[key] is not None:
                 value = data[key]
                 if isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -427,8 +428,13 @@ async def save_env_settings(request: Request):
                 if len(value) > 4096 or "\x00" in value:
                     return JSONResponse({"success": False, "message": f"{key} is invalid."},
                                         status_code=400)
+                if key == "SITEWATCH_URL" and value.strip() and not value.strip().lower().startswith(("http://", "https://")):
+                    return JSONResponse({"success": False, "message": "SITEWATCH_URL must start with http:// or https://."},
+                                        status_code=400)
                 # Strip newlines so a crafted value can't inject extra .env entries
                 updates[key] = value.replace("\n", " ").replace("\r", " ").strip()
+                if key == "SITEWATCH_URL":
+                    updates[key] = updates[key].rstrip("/")
         if updates:
             try:
                 _write_env_file(updates)
@@ -436,6 +442,203 @@ async def save_env_settings(request: Request):
                 logger.warning("Failed to write .env: %s", e)
                 return {"success": False, "message": "Could not write .env file."}
     return {"success": True}
+
+
+# ── SiteWatch: website scans of prospects before writing ──
+
+SITEWATCH_CODES = ("SITEWATCH_ISSUES", "SITEWATCH_STATUS", "SITEWATCH_UI_ISSUES", "SITEWATCH_SEO_ISSUES")
+# The scan's separate UI and SEO reports: field prefix per signal code.
+SITEWATCH_AUDIT_FIELDS = {"SITEWATCH_UI_ISSUES": "ui", "SITEWATCH_SEO_ISSUES": "seo"}
+
+
+def _sitewatch_audit_fields(latest: dict, company_id: str) -> dict:
+    """ui_issues / ui_text / ui_report_url and the seo_ ones, from the latest observations."""
+    out = {}
+    for code, prefix in SITEWATCH_AUDIT_FIELDS.items():
+        o = latest.get((company_id, code)) or {}
+        out.update({f"{prefix}_issues": o.get("value_num"), f"{prefix}_text": o.get("value_text") or "",
+                    f"{prefix}_report_url": o.get("evidence_url") or ""})
+    return out
+
+
+def _audit_json(report) -> dict | None:
+    if report is None:
+        return None
+    return {"score": report.score, "grade": report.grade, "report_url": report.report_url,
+            "findings": report.findings}
+
+
+def _sitewatch_client():
+    """A client from the .env on disk (so a just-saved key is used), or None."""
+    from harvey.integrations.sitewatch import SiteWatchClient
+    env_vars = _read_env_file()
+    url = (env_vars.get("SITEWATCH_URL") or "").strip().rstrip("/")
+    token = (env_vars.get("SITEWATCH_API_TOKEN") or "").strip()
+    return SiteWatchClient(url, token) if url and token else None
+
+
+def _sitewatch_missing():
+    return JSONResponse({"success": False,
+                         "message": "Save the SiteWatch address and API token first."}, status_code=400)
+
+
+_sitewatch_sync_lock = asyncio.Lock()
+
+
+async def _sitewatch_sync():
+    """Send approved leads' websites to SiteWatch and read back finished
+    scans, the same stage `harvey run` runs every cycle. Returns
+    (requested, observed), or None when scans before writing are off, not
+    configured, or their signals aren't confirmed."""
+    from harvey.collectors.sitewatch import active_client, run_sitewatch_stage
+    from harvey.config import load_config, load_env
+    try:
+        config, env = load_config(), load_env()
+    except Exception:
+        return None
+    env_vars = _read_env_file()                      # a key just saved on the page wins
+    env.sitewatch_url = (env_vars.get("SITEWATCH_URL") or env.sitewatch_url or "").strip().rstrip("/")
+    env.sitewatch_api_token = (env_vars.get("SITEWATCH_API_TOKEN") or env.sitewatch_api_token or "").strip()
+    async with _sitewatch_sync_lock:
+        state = _state()
+        await state.init_db()
+        client = await active_client(state, config, env)
+        if client is None:
+            return None
+        return await run_sitewatch_stage(state, config, env, client=client)
+
+
+@app.post("/api/sitewatch/sync")
+async def sitewatch_sync():
+    result = await _sitewatch_sync()
+    if result is None:
+        return {"success": True, "active": False}
+    requested, observed = result
+    return {"success": True, "active": True, "requested": requested, "observed": observed}
+
+
+@app.get("/api/sitewatch")
+async def get_sitewatch():
+    """Connection, on/off, confirmed signals, and the latest scan per company."""
+    env_vars = _read_env_file()
+    enabled, config_file, config_error = False, "", ""
+    try:
+        from harvey.config import _find_config_file, load_config
+        enabled = bool(load_config().sitewatch.enabled)
+        config_file = Path(_find_config_file()).name
+    except Exception as e:
+        config_error = str(e)[:300]
+    confirmed = [r["code"] for r in await query_db(
+        f"SELECT code FROM signal_codes WHERE status = 'confirmed' AND code IN ({_in(SITEWATCH_CODES)})",
+        SITEWATCH_CODES)]
+    scans = await query_db(
+        """SELECT s.company_id, s.scan_id, s.state, s.error, s.requested_at, s.finished_at,
+                  c.name AS company, c.domain
+           FROM sitewatch_scans s JOIN companies c ON c.id = s.company_id
+           ORDER BY s.requested_at DESC LIMIT 100""")
+    if scans:
+        ids = [s["company_id"] for s in scans]
+        obs = await query_db(
+            f"""SELECT company_id, signal_code, value_num, value_text, evidence_url FROM observations
+                WHERE company_id IN ({_in(ids)}) AND signal_code IN ({_in(SITEWATCH_CODES)})
+                ORDER BY observed_at""", (*ids, *SITEWATCH_CODES))
+        latest = {(o["company_id"], o["signal_code"]): o for o in obs}   # newest wins
+        for s in scans:
+            st = latest.get((s["company_id"], "SITEWATCH_STATUS")) or {}
+            iss = latest.get((s["company_id"], "SITEWATCH_ISSUES")) or {}
+            s.update({"status": st.get("value_text") or "", "score": st.get("value_num"),
+                      "issues": iss.get("value_num"), "issue_text": iss.get("value_text") or "",
+                      "report_url": iss.get("evidence_url") or st.get("evidence_url") or "",
+                      **_sitewatch_audit_fields(latest, s["company_id"])})
+    return {
+        "url": (env_vars.get("SITEWATCH_URL") or "").strip(),
+        "token_set": bool((env_vars.get("SITEWATCH_API_TOKEN") or "").strip()),
+        "enabled": enabled, "config_file": config_file, "config_error": config_error,
+        "confirmed": confirmed, "codes": list(SITEWATCH_CODES),
+        "pending": sum(1 for s in scans if s["state"] == "pending"),
+        "scans": scans,
+    }
+
+
+@app.post("/api/sitewatch/test")
+async def sitewatch_test():
+    from harvey.integrations.sitewatch import SiteWatchError
+    client = _sitewatch_client()
+    if client is None:
+        return _sitewatch_missing()
+    try:
+        name = await client.ping()
+    except SiteWatchError as e:
+        return {"success": False, "message": str(e)}
+    return {"success": True, "message": f'Connected. Prospect sites are filed under "{name}".'}
+
+
+@app.post("/api/sitewatch/scan")
+async def sitewatch_scan(request: Request):
+    """Scan one website by hand. Poll /api/sitewatch/scans/{id} for the result."""
+    from harvey.integrations.sitewatch import SiteWatchError
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    url = data.get("url") if isinstance(data, dict) else None
+    if not isinstance(url, str) or not url.strip() or len(url) > 255:
+        return JSONResponse({"success": False, "message": "Enter a website address."}, status_code=400)
+    client = _sitewatch_client()
+    if client is None:
+        return _sitewatch_missing()
+    try:
+        started = await client.request_scan(url.strip())
+    except SiteWatchError as e:
+        return {"success": False, "message": str(e)}
+    return {"success": True, "scan_id": started.scan_id, "state": started.state}
+
+
+@app.get("/api/sitewatch/scans/{scan_id}")
+async def sitewatch_scan_result(scan_id: int):
+    from harvey.integrations.sitewatch import SiteWatchError
+    client = _sitewatch_client()
+    if client is None:
+        return _sitewatch_missing()
+    try:
+        result = await client.get_scan(scan_id)
+    except SiteWatchError as e:
+        return {"success": False, "message": str(e)}
+    return {"success": True, "scan_id": result.scan_id, "state": result.state, "done": result.done,
+            "status": result.status, "score": result.score, "report_url": result.report_url,
+            "error": result.error, "findings": result.findings,
+            "advanced_report_url": result.advanced_report_url,
+            "ui": _audit_json(result.ui), "seo": _audit_json(result.seo)}
+
+
+@app.post("/api/sitewatch/enabled")
+async def sitewatch_enabled(request: Request):
+    """Turn scans before writing on or off. Turning on also confirms the
+    SiteWatch signals (security, UI and SEO): this switch is the user saying
+    yes to them."""
+    from pydantic import ValidationError
+    from harvey.config import ConfigError, set_sitewatch_enabled
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+        return JSONResponse({"success": False, "message": "Send enabled: true or false."}, status_code=400)
+    on = data["enabled"]
+    try:
+        path = set_sitewatch_enabled(on)
+    except (ConfigError, ValidationError) as e:
+        return {"success": False, "message": str(e)[:300]}
+    if on:
+        from harvey.signals import seed_signal_catalog
+        state = _state()
+        await state.init_db()
+        await seed_signal_catalog(state)
+        for code in SITEWATCH_CODES:
+            await state.set_signal_status(code, "confirmed")
+    return {"success": True, "message": (
+        f"Website scans turned {'on' if on else 'off'} in {path.name}. "
+        "Restart Harvey (harvey run) for a running Harvey to pick it up.")}
 
 
 @app.post("/api/trulyinbox/connect")
@@ -996,6 +1199,7 @@ def _state():
 # What a reviewer needs next to a draft to check its claims against the facts.
 OUTBOX_CONTEXT_SIGNALS = (
     "TECH_STACK", "INCUMBENT_AGENCY", "HIRING_ROLE", "RUNNING_GOOGLE_ADS", "NO_ONLINE_BOOKING",
+    "SITEWATCH_ISSUES", "SITEWATCH_STATUS", "SITEWATCH_UI_ISSUES", "SITEWATCH_SEO_ISSUES",
 )
 
 
@@ -1843,6 +2047,46 @@ async def get_activity():
     return rows
 
 
+@app.get("/api/activity/feed")
+async def get_activity_feed(limit: int = 400, checkins: bool = False):
+    """The Activity page: the latest actions (Harvey's own check-ins only when
+    asked for), plus last-7-days totals and when Harvey last checked in."""
+    limit = max(1, min(int(limit), 2000))
+    where = "" if checkins else "WHERE agent != 'main'"
+    rows = await query_db(f"SELECT * FROM actions {where} ORDER BY created_at DESC LIMIT ?", (limit,))
+    for row in rows:
+        try:
+            row["details"] = json.loads(row.get("details_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            row["details"] = {}
+        row.pop("details_json", None)
+
+    week = await query_db(
+        """SELECT action_type, agent, details_json FROM actions
+           WHERE datetime(created_at) >= datetime('now', '-7 days') AND agent != 'main'""")
+    summary = {"leads_found": 0, "emails_sent": 0, "replies": 0, "problems": 0}
+    for r in week:
+        t = r["action_type"]
+        if t == "prospect":
+            try:
+                summary["leads_found"] += int(json.loads(r["details_json"] or "{}").get("prospects_found") or 0)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
+        elif t == "email_sent":
+            summary["emails_sent"] += 1
+        elif t in ("reply", "reply_queued", "manual_reply"):
+            summary["replies"] += 1
+        elif t in ("bounce", "write_failed", "escalation", "reply_after_opt_out"):
+            summary["problems"] += 1
+    last = await query_db("SELECT created_at, action_type FROM actions WHERE agent = 'main' "
+                          "ORDER BY created_at DESC LIMIT 1")
+    checked = await query_db("SELECT COUNT(*) AS n FROM actions WHERE agent = 'main' "
+                             "AND datetime(created_at) >= datetime('now', '-7 days')")
+    summary["last_checkin"] = last[0]["created_at"] if last else None
+    summary["checkins_week"] = checked[0]["n"] if checked else 0
+    return {"items": rows, "summary": summary}
+
+
 # ── Dashboard UI ──
 
 
@@ -2001,6 +2245,291 @@ Return JSON with these keys:
 Only use what the request says or clearly implies; never invent a city it doesn't name."""
 
 
+@app.get("/api/leads/found")
+async def get_found_leads():
+    """Every lead Harvey found, with its business type and approval, for the
+    Leads page (filtered and sorted in the page)."""
+    rows = await query_db(
+        """SELECT p.id, p.first_name, p.last_name, p.title, p.email, p.email_status,
+                  p.status, COALESCE(p.lead_approval, 'approved') AS approval, p.created_at,
+                  p.source, p.company_id,
+                  COALESCE(NULLIF(c.name, ''), p.company) AS company,
+                  c.domain, c.website, c.location,
+                  COALESCE(NULLIF(TRIM(c.industry), ''), NULLIF(TRIM(p.industry), ''), 'Other') AS business_type
+           FROM prospects p LEFT JOIN companies c ON c.id = p.company_id
+           ORDER BY p.created_at DESC LIMIT 5000""")
+    counts = {"pending": 0, "approved": 0, "rejected": 0}
+    for r in rows:
+        if r["approval"] in counts:
+            counts[r["approval"]] += 1
+
+    # Each company's SiteWatch scan: its state, and the latest result.
+    company_ids = sorted({r["company_id"] for r in rows if r["company_id"]})
+    reports = {}
+    if company_ids:
+        for s in await query_db(
+                f"SELECT company_id, state, error FROM sitewatch_scans WHERE company_id IN ({_in(company_ids)})",
+                tuple(company_ids)):
+            reports[s["company_id"]] = {"state": s["state"], "error": s["error"] or ""}
+        for o in await query_db(
+                f"""SELECT company_id, signal_code, value_num, value_text, evidence_url FROM observations
+                    WHERE company_id IN ({_in(company_ids)}) AND signal_code IN ({_in(SITEWATCH_CODES)})
+                    ORDER BY observed_at""", (*company_ids, *SITEWATCH_CODES)):
+            rep = reports.setdefault(o["company_id"], {"state": "done", "error": ""})
+            prefix = SITEWATCH_AUDIT_FIELDS.get(o["signal_code"])
+            if prefix:                              # the separate UI / SEO report
+                rep.update({f"{prefix}_issues": o["value_num"], f"{prefix}_text": o["value_text"] or "",
+                            f"{prefix}_report_url": o["evidence_url"] or ""})
+                continue
+            if o["signal_code"] == "SITEWATCH_STATUS":
+                rep.update(status=o["value_text"] or "", score=o["value_num"])
+            else:
+                rep.update(issues=o["value_num"], issue_text=o["value_text"] or "")
+            if o["evidence_url"]:
+                rep["report_url"] = o["evidence_url"]
+    for r in rows:
+        r["report"] = reports.get(r["company_id"])
+    return {"leads": rows, "counts": counts}
+
+
+@app.get("/api/leads/{prospect_id}/details")
+async def get_lead_details(prospect_id: str):
+    """One lead in full, for the Leads page: why Harvey picked it (your
+    request, how it was found, its fit), what the company seems to need (its
+    own description, website problems, signals), and the emails written for
+    it."""
+    from harvey.collectors.sitewatch import website_issue_facts
+    from harvey.register import build_register
+    rows = await query_db("SELECT * FROM prospects WHERE id = ?", (prospect_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such lead."}, status_code=404)
+    p = rows[0]
+    cid = p.get("company_id") or ""
+    company = (await query_db("SELECT * FROM companies WHERE id = ?", (cid,)) or [{}])[0] if cid else {}
+
+    state = _state()
+    await state.init_db()
+    request_text, request_summary = "", ""
+    try:
+        saved = json.loads(await state.get_setting("lead_request") or "null") or {}
+        request_text = saved.get("text") or ""
+        request_summary = (saved.get("spec") or {}).get("summary") or ""
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    fit, fit_reasons, hiring = None, [], ""
+    if cid:
+        try:
+            from harvey.config import load_config
+            reg = await build_register(query_db, load_config(), cid)
+            if reg:
+                fit, fit_reasons, hiring = reg[0]["fit"], reg[0]["fit_reasons"], reg[0]["hiring"]
+        except Exception as e:
+            logger.warning("lead details: register failed: %s", e)
+
+    issues = [f.lstrip("- ").strip() for f in (await website_issue_facts(state, cid) or [])] if cid else []
+    signals = []
+    if cid:
+        for o in await query_db(
+                f"""SELECT sc.label, o.value_text, o.value_num FROM observations o
+                   JOIN signal_codes sc ON sc.code = o.signal_code
+                   WHERE o.company_id = ? AND o.signal_code NOT IN ({_in(SITEWATCH_CODES)})
+                   ORDER BY o.observed_at DESC LIMIT 60""", (cid, *SITEWATCH_CODES)):
+            value = o["value_text"] or ("yes" if o["value_num"] == 1 else "" if o["value_num"] in (None, 0) else str(o["value_num"]))
+            if value and (o["label"], value) not in signals:
+                signals.append((o["label"], value))
+    messages = await query_db(
+        "SELECT step, kind, subject, body, status, send_at, sent_at FROM outbox WHERE prospect_id = ? "
+        "ORDER BY step, created_at", (prospect_id,))
+    return {
+        "success": True,
+        "purpose": {
+            "your_request": request_text, "request_summary": request_summary,
+            "business_type": company.get("industry") or p.get("industry") or "",
+            "found_via": company.get("source") or p.get("source") or "",
+            "found_url": company.get("source_url") or p.get("source_url") or "",
+            "fit": fit, "fit_reasons": fit_reasons,
+        },
+        "needs": {
+            "about": company.get("description") or "",
+            "website_problems": issues,
+            "hiring": hiring,
+            "notes": p.get("personalization_notes") or "",
+            "signals": [{"label": l, "value": v[:200]} for l, v in signals[:12]],
+        },
+        "messages": messages,
+    }
+
+
+@app.post("/api/leads/approval")
+async def set_leads_approval(request: Request):
+    """Approve, reject or reset leads: {ids: [...], approval: approved|rejected|pending}."""
+    from harvey.state import LEAD_APPROVALS
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    ids = data.get("ids") if isinstance(data, dict) else None
+    approval = data.get("approval") if isinstance(data, dict) else None
+    if (not isinstance(ids, list) or not ids or len(ids) > 1000
+            or not all(isinstance(i, str) and 0 < len(i) <= 64 for i in ids)):
+        return JSONResponse({"success": False, "message": "Pick at least one lead."}, status_code=400)
+    if approval not in LEAD_APPROVALS:
+        return JSONResponse({"success": False, "message": "Unknown approval."}, status_code=400)
+    state = _state()
+    await state.init_db()
+    changed = await state.set_lead_approval(ids, approval)
+    if changed:
+        try:
+            await state.log_action(action_type="lead_approval", agent="dashboard",
+                                   details={"approval": approval, "count": changed})
+        except Exception as e:
+            logger.warning("Couldn't log lead approval: %s", e)
+    word = {"approved": "approved", "rejected": "rejected", "pending": "moved back to pending"}[approval]
+    message = f"{changed} lead{'s' if changed != 1 else ''} {word}."
+    sent = 0
+    if approval == "approved" and changed:
+        # Approved leads go to SiteWatch now, so the report is ready by the
+        # time Harvey writes; the Leads page reads the results back.
+        try:
+            synced = await _sitewatch_sync()
+        except Exception as e:
+            logger.warning("SiteWatch after approval failed: %s", e)
+            synced = None
+        if synced is not None:
+            sent = synced[0]
+            message += (f" {sent} website{'s' if sent != 1 else ''} sent to SiteWatch for a report."
+                        if sent else " Their websites already have a SiteWatch report or one on the way.")
+        else:
+            message += " Harvey writes to them on its next cycles."
+    return {"success": True, "changed": changed, "sent_to_sitewatch": sent, "message": message}
+
+
+def _config_env():
+    """Harvey's config and env, with SiteWatch keys from the .env on disk
+    (a key just saved on a page wins)."""
+    from harvey.config import load_config, load_env
+    config, env = load_config(), load_env()
+    env_vars = _read_env_file()
+    env.sitewatch_url = (env_vars.get("SITEWATCH_URL") or env.sitewatch_url or "").strip().rstrip("/")
+    env.sitewatch_api_token = (env_vars.get("SITEWATCH_API_TOKEN") or env.sitewatch_api_token or "").strip()
+    return config, env
+
+
+def _lead_ids(data):
+    ids = data.get("ids") if isinstance(data, dict) else None
+    if (not isinstance(ids, list) or not ids or len(ids) > 1000
+            or not all(isinstance(i, str) and 0 < len(i) <= 64 for i in ids)):
+        return None
+    return ids
+
+
+@app.post("/api/leads/report")
+async def leads_report_action(request: Request):
+    """For leads whose website report failed or is stuck: 'rescan' asks
+    SiteWatch again; 'skip' lets Harvey write to them without a report."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    ids = _lead_ids(data)
+    action = data.get("action") if isinstance(data, dict) else None
+    if ids is None or action not in ("rescan", "skip"):
+        return JSONResponse({"success": False, "message": "Pick leads and rescan or skip."}, status_code=400)
+    rows = await query_db(f"SELECT DISTINCT company_id FROM prospects WHERE id IN ({_in(ids)}) "
+                          "AND COALESCE(company_id, '') != ''", tuple(ids))
+    companies = [r["company_id"] for r in rows]
+    state = _state()
+    await state.init_db()
+    if action == "skip":
+        for cid in companies:
+            await state.set_sitewatch_scan(cid, None, state="skipped", error="You chose to write without a report")
+        return {"success": True, "message": f"{len(companies)} compan{'y' if len(companies) == 1 else 'ies'} will be "
+                                            "written to without a website report."}
+    await state.sitewatch_reset(companies)
+    synced = await _sitewatch_sync()
+    if synced is None:
+        return {"success": False, "message": "SiteWatch scans are off or not set up (SiteWatch page)."}
+    return {"success": True, "message": f"{synced[0]} website{'s' if synced[0] != 1 else ''} sent to SiteWatch again."}
+
+
+_campaign_task: asyncio.Task | None = None
+_campaign_report: dict | None = None
+
+
+@app.post("/api/campaigns/create")
+async def create_campaign(request: Request):
+    """Write a campaign now for the leads you picked: approved, not yet
+    contacted, a deliverable address and (with SiteWatch on) a finished
+    website report. Runs in the background; GET this path for the result."""
+    global _campaign_task, _campaign_report
+    from harvey.state import WRITABLE_EMAIL_STATUSES
+    if _campaign_task and not _campaign_task.done():
+        return JSONResponse({"success": False, "message": "A campaign is already being written."}, status_code=409)
+    try:
+        data = await request.json()
+    except Exception:
+        data = None
+    ids = _lead_ids(data)
+    if ids is None:
+        return JSONResponse({"success": False, "message": "Pick at least one lead."}, status_code=400)
+    try:
+        config, env = _config_env()
+    except Exception as e:
+        return JSONResponse({"success": False, "message": f"Harvey's config can't be read: {e}"}, status_code=400)
+
+    from harvey.collectors.sitewatch import reports_required
+    state = _state()
+    await state.init_db()
+    need_report = await reports_required(state, config, env)
+    ready, skipped = [], {"not approved": 0, "already contacted": 0, "no usable email": 0,
+                          "waiting for website report": 0}
+    for pid in ids:
+        p = await state.get_prospect(pid)
+        if not p:
+            continue
+        if (p.lead_approval or "approved") != "approved":
+            skipped["not approved"] += 1
+        elif p.status != "new":
+            skipped["already contacted"] += 1
+        elif not p.email or (p.email_status or "guess") not in WRITABLE_EMAIL_STATUSES:
+            skipped["no usable email"] += 1
+        elif need_report and not await state.sitewatch_report_ready(p.company_id):
+            skipped["waiting for website report"] += 1
+        else:
+            ready.append(pid)
+    skipped = {k: v for k, v in skipped.items() if v}
+    if not ready:
+        return {"success": False, "started": False, "skipped": skipped,
+                "message": "None of these leads can be written to yet: "
+                           + ", ".join(f"{v} {k}" for k, v in skipped.items()) + "."}
+
+    async def _go():
+        global _campaign_report
+        from harvey.agents.writer import Writer
+        from harvey.brain import Brain
+        _campaign_report = {"running": True, "requested": len(ready), "skipped": skipped}
+        try:
+            writer = Writer(Brain(state, config.brain), state, config, env)
+            await writer.run(only_ids=ready)
+            _campaign_report = {"running": False, "requested": len(ready), "written": writer.written,
+                                "skipped": skipped}
+        except Exception as e:
+            logger.exception("create campaign failed")
+            _campaign_report = {"running": False, "requested": len(ready), "written": 0,
+                                "skipped": skipped, "error": str(e)[:300]}
+
+    _campaign_report = {"running": True, "requested": len(ready), "skipped": skipped}
+    _campaign_task = asyncio.create_task(_go())
+    return {"success": True, "started": True, "ready": len(ready), "skipped": skipped,
+            "message": f"Writing a campaign for {len(ready)} lead{'s' if len(ready) != 1 else ''}…"}
+
+
+@app.get("/api/campaigns/create")
+async def create_campaign_status():
+    return {"running": bool(_campaign_task and not _campaign_task.done()), "report": _campaign_report}
+
+
 @app.get("/api/leads/request")
 async def get_lead_request():
     state = _state()
@@ -2130,6 +2659,181 @@ async def find_leads(request: Request):
     _discovery_task = asyncio.create_task(_go())
     return {"success": True, "spec": spec, "provider": provider,
             "queries": [q.keyword() for q in queries]}
+
+
+# ── Email template: the operator's own email rules (writer.email_rules) ──
+
+DEFAULT_EMAIL_RULES = "skills/email_rules.md"
+
+
+def _email_rules_file(config) -> tuple[str, Path]:
+    """The rules file the Writer reads (writer.email_rules), or the default
+    one when none is set. Only files inside the Harvey folder are offered:
+    the page must never read or overwrite anything else on the machine."""
+    raw = str(getattr(getattr(config, "writer", None), "email_rules", "") or "").strip()
+    raw = raw or DEFAULT_EMAIL_RULES
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    path = path.resolve()
+    if not path.is_relative_to(PROJECT_ROOT.resolve()):
+        raise ValueError(f"{raw} is outside the Harvey folder; edit it by hand.")
+    return raw, path
+
+
+def _clean_rules(value) -> str:
+    from harvey.config import MAX_EMAIL_RULES_CHARS
+    if not isinstance(value, str):
+        raise ValueError("The template must be text.")
+    text = value.replace("\r\n", "\n").replace("\x00", "").strip()
+    if not text:
+        raise ValueError("The template is empty.")
+    if len(text) > MAX_EMAIL_RULES_CHARS:
+        raise ValueError(f"The template is {len(text):,} characters; the limit is {MAX_EMAIL_RULES_CHARS:,}.")
+    return text
+
+
+def _point_writer_at(rel: str):
+    """Make writer.email_rules name the template, editing only that line so
+    the rest of the config file (comments, order) stays as it is."""
+    path = _resolve_config_file()
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text) or {}
+    if str((data.get("writer") or {}).get("email_rules") or "").strip():
+        return
+    if re.search(r"(?m)^writer:\s*$", text):
+        text = re.sub(r"(?m)^writer:\s*$", f"writer:\n  email_rules: {rel}", text, count=1)
+    else:
+        text = text.rstrip("\n") + f"\nwriter:\n  email_rules: {rel}\n"
+    if (yaml.safe_load(text) or {}).get("writer", {}).get("email_rules") != rel:
+        raise ValueError("Couldn't set writer.email_rules safely; add it to the config by hand.")
+    path.write_text(text, encoding="utf-8")
+
+
+@app.get("/api/email-template")
+async def get_email_template():
+    """The template Harvey writes cold emails from, as the operator wrote it."""
+    from harvey.config import MAX_EMAIL_RULES_CHARS, load_config
+    try:
+        config = load_config()
+        rel, path = _email_rules_file(config)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    from harvey import email_template
+    active = bool(str(getattr(config.writer, "email_rules", "") or "").strip())
+    try:
+        content = path.read_text(encoding="utf-8") if path.is_file() else ""
+        saved = _editor_file(path)
+        editor = json.loads(saved.read_text(encoding="utf-8")) if saved.is_file() else None
+        editor = email_template.clean(editor) if editor else None
+    except (OSError, ValueError) as e:
+        logger.warning("Email editor data unusable, starting from the default: %s", e)
+        editor = None
+    in_sync = bool(editor) and email_template.render(editor).strip() == content.strip()
+    return {"path": rel, "content": content, "active": active, "limit": MAX_EMAIL_RULES_CHARS,
+            "editor": editor or email_template.DEFAULT, "editor_in_sync": in_sync,
+            "placeholders": list(email_template.PLACEHOLDERS),
+            "sender": {"name": config.persona.name, "company": config.persona.company}}
+
+
+def _editor_file(rules_path: Path) -> Path:
+    """Where the editor's emails are kept: beside the rules they render to."""
+    return rules_path.with_name("email_template.json")
+
+
+def _atomic_write(path: Path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _rules_from(data: dict) -> tuple[str, dict | None]:
+    """(rules text, editor emails or None) from what the page sent: the
+    editor's emails, rendered into rules, or the raw rules (Advanced)."""
+    from harvey import email_template
+    if data.get("editor") is not None:
+        editor = email_template.clean(data["editor"])
+        return _clean_rules(email_template.render(editor)), editor
+    return _clean_rules(data.get("content")), None
+
+
+@app.post("/api/email-template")
+async def save_email_template(request: Request):
+    """Save the template; the Writer uses it for every email it writes next.
+    Drafts already in the Outbox keep their text."""
+    from harvey import email_template
+    from harvey.agents.writer import EMAIL_RULES_PROBLEM_KEY
+    from harvey.config import load_config
+    try:
+        data = await request.json()
+        text, editor = _rules_from(data if isinstance(data, dict) else {})
+        config = load_config()
+        rel, path = _email_rules_file(config)
+        _atomic_write(path, text + "\n")
+        if editor is not None:
+            _atomic_write(_editor_file(path), email_template.dumps(editor))
+        _point_writer_at(rel)
+    except ValueError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    except Exception as e:
+        logger.warning("Saving the email template failed: %s", e)
+        return JSONResponse({"success": False, "message": "Could not save the template."}, status_code=500)
+    state = _state()
+    await state.init_db()
+    await state.delete_setting(EMAIL_RULES_PROBLEM_KEY)  # a fixed template clears the warning
+    return {"success": True, "path": rel}
+
+
+@app.post("/api/email-template/preview")
+async def preview_email_template(request: Request):
+    """Draft one first email for one lead from the template on screen (saved
+    or not). Nothing goes to the Outbox and nothing is sent; it costs one
+    model call."""
+    from harvey.agents.writer import Writer
+    from harvey.brain import Brain
+    from harvey.config import load_config, load_email_rules, load_env
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    try:
+        config = load_config()
+        if data.get("editor") is not None or data.get("content"):
+            rules = _rules_from(data)[0]
+        else:
+            rules = load_email_rules(config)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    state = _state()
+    await state.init_db()
+    pid = str(data.get("prospect_id") or "")
+    if not pid:
+        # The best-scored named person at a company, else anyone.
+        rows = await query_db(
+            "SELECT id FROM prospects WHERE company_id IS NOT NULL AND company_id != '' "
+            "AND status NOT IN ('opted_out', 'bounced') "
+            "ORDER BY (first_name != '') DESC, score DESC, created_at DESC LIMIT 1")
+        pid = rows[0]["id"] if rows else ""
+    prospect = await state.get_prospect(pid) if pid else None
+    if not prospect:
+        return JSONResponse({"success": False, "message": "No lead to preview with yet. Find some leads first."},
+                            status_code=400)
+    writer = Writer(Brain(state, config.brain), state, config, load_env())
+    writer.skills = writer.brain.load_skills_for_agent("writer")
+    writer.email_rules = rules
+    draft = await writer._write_personal_email(prospect)
+    if not draft:
+        return JSONResponse({"success": False, "message": "Claude didn't return a draft. Try again."}, status_code=502)
+    return {"success": True, "subject": draft["subject"], "body": draft["body"],
+            "to": {"name": prospect.full_name().strip() or "General inbox", "company": prospect.company,
+                   "email_status": prospect.email_status or ""}}
 
 
 @app.post("/api/profile/run")
@@ -2430,7 +3134,10 @@ async def get_today():
         n_companies = companies[0]["n"] if companies else 0
 
         unprofiled_count = await state.count_companies_needing_profile()
+        leads_pending = await query_db(
+            "SELECT COUNT(*) AS n FROM prospects WHERE lead_approval = 'pending' AND status = 'new'")
         stats = {
+            "leads_pending": leads_pending[0]["n"] if leads_pending else 0,
             "companies": n_companies,
             "prospects": sum(counts.values()),
             "signals_confirmed": len(confirmed),
@@ -2573,6 +3280,15 @@ async def get_today():
                            "Autopilot sends the rest on its own; these wait for you. "
                            "Read them one at a time."),
                 "action": "Open the decisions desk", "tab": "outbox",
+            })
+
+        if stats["leads_pending"]:
+            n = stats["leads_pending"]
+            items.append({
+                "key": "leads", "tone": "warn",
+                "title": f"{n} lead{'s' if n != 1 else ''} waiting for approval",
+                "detail": "Harvey only writes to leads you approve. Approve or reject them by business type.",
+                "action": "Review leads", "tab": "found",
             })
 
         if open_convos:

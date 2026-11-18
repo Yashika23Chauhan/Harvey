@@ -50,6 +50,8 @@ NAMES = {
     "united kingdom": "GB", "uk": "GB", "gb": "GB", "england": "GB",
     "pakistan": "PK", "bangladesh": "BD", "philippines": "PH", "singapore": "SG",
     "united arab emirates": "AE", "uae": "AE",
+    # ISO 3-letter codes, which some sites use in addressCountry.
+    "aus": "AU", "can": "CA", "ind": "IN", "gbr": "GB", "nzl": "NZ", "irl": "IE",
 }
 US_STATES = {
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
@@ -105,6 +107,74 @@ def evidence(domain: str, html: str) -> list[set[str]]:
     out += [{c} for c in _schema_countries(html)]
     out += [CALLING[m.group(1)] for m in _PHONE.finditer(html)]
     return out
+
+
+COUNTRY_NAMES = {
+    "US": "USA", "CA": "Canada", "AU": "Australia", "NZ": "New Zealand", "GB": "United Kingdom",
+    "IE": "Ireland", "IN": "India", "PK": "Pakistan", "BD": "Bangladesh", "LK": "Sri Lanka",
+    "NP": "Nepal", "AE": "UAE", "SA": "Saudi Arabia", "QA": "Qatar", "SG": "Singapore",
+    "MY": "Malaysia", "PH": "Philippines", "ID": "Indonesia", "VN": "Vietnam", "TH": "Thailand",
+    "CN": "China", "HK": "Hong Kong", "JP": "Japan", "KR": "South Korea", "DE": "Germany",
+    "FR": "France", "ES": "Spain", "IT": "Italy", "NL": "Netherlands", "BE": "Belgium",
+    "CH": "Switzerland", "AT": "Austria", "SE": "Sweden", "NO": "Norway", "DK": "Denmark",
+    "FI": "Finland", "PL": "Poland", "PT": "Portugal", "RO": "Romania", "UA": "Ukraine",
+    "RU": "Russia", "TR": "Turkey", "IL": "Israel", "EG": "Egypt", "ZA": "South Africa",
+    "NG": "Nigeria", "KE": "Kenya", "BR": "Brazil", "MX": "Mexico", "AR": "Argentina",
+    "CL": "Chile", "PE": "Peru",
+}
+_ADDRESS = re.compile(r'"address"\s*:\s*(\{[^{}]*\})')
+_FIELD = r'"{}"\s*:\s*"([^"<>]{{1,80}})"'
+
+
+def _country_name(raw: str) -> str:
+    raw = (raw or "").strip()
+    code = NAMES.get(raw.lower()) or (raw.upper() if raw.upper() in COUNTRY_NAMES else "")
+    return COUNTRY_NAMES.get(code, raw if len(raw) > 2 else "")
+
+
+def _published_address(html: str) -> tuple[str, str, str]:
+    """(city, region, country) from ONE schema.org PostalAddress, so a
+    company with offices in two countries never gets one's city and the
+    other's country. A "city" that reads like a street line is skipped."""
+    for m in _ADDRESS.finditer(html or ""):
+        obj = m.group(1)
+        get = lambda k: (re.search(_FIELD.format(k), obj) or [None, ""])[1].strip()
+        city = get("addressLocality")
+        if not city or len(city) > 40 or re.search(r"\d", city):
+            continue
+        region = get("addressRegion")
+        region = region if len(region) <= 30 and not re.search(r"\d", region) else ""
+        return city, region, _country_name(get("addressCountry"))
+    return "", "", ""
+
+
+def site_location(domain: str, html: str, searched_place: str = "") -> str:
+    """A readable location for the Companies list, best evidence first:
+    the address the site publishes (schema.org), then the place Harvey
+    searched in when the site doesn't contradict it, then just the country
+    the site points to. "" when there's nothing to go on."""
+    seen: dict[str, int] = {}
+    for allowed in evidence(domain, html):
+        for c in allowed:
+            seen[c] = seen.get(c, 0) + 1
+
+    city, region, country = _published_address(html)
+    if city:
+        if not country:
+            # "Surry Hills, NSW" on a .com.au site: add the country the site shows.
+            tld = (domain or "").lower().rsplit(".", 1)[-1]
+            country = COUNTRY_NAMES.get(CCTLD.get(tld, ""), "")
+        return ", ".join(x for x in (city, region, country) if x)
+    place_country = country_of_place(searched_place)
+    if searched_place and (not seen or place_country in seen):
+        return searched_place
+    if seen:
+        best = max(seen, key=seen.get)
+        # "+1" alone can't tell the US from Canada: don't guess between them.
+        if set(seen) == {"US", "CA"} and seen["US"] == seen["CA"]:
+            return "USA or Canada"
+        return COUNTRY_NAMES.get(best, best)
+    return ""
 
 
 def outside_targets(domain: str, html: str, geography: list[str] | None) -> str:

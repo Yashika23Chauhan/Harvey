@@ -23,6 +23,8 @@ linkedin_cookies.json
 skills/product_knowledge.md
 # Your own email rules (writer.email_rules) — product-specific
 skills/email_rules.md
+# What the dashboard's email editor saved (rendered into email_rules.md).
+skills/email_template.json
 
 # Local agent tooling
 .agents/
@@ -62,3 +64,4 @@ harvey.local.yaml
 # Backups and in-progress writes from `harvey train` hold the same config.
 harvey.local.yaml.*
 harvey.yaml.*
+start-harvey.bat
