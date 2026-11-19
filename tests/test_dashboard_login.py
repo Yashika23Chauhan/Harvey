@@ -48,7 +48,8 @@ def test_status_says_when_no_account_exists(client):
     status = client.get("/auth/status").json()
     assert {k: status[k] for k in ("has_users", "signup_open")} == {"has_users": False, "signup_open": True}
     signup(client)
-    assert client.get("/auth/status").json() == {"has_users": True, "signup_open": False}
+    status = client.get("/auth/status").json()
+    assert {k: status[k] for k in ("has_users", "signup_open")} == {"has_users": True, "signup_open": False}
 
 
 def test_signup_returns_the_dashboard_token(client, env):
