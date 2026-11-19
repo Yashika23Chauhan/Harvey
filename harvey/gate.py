@@ -419,6 +419,9 @@ _SCRIPT_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:>|[\"“'‘])")
 # ...and scripts quoted mid-line ('- Entry: "We have a 14-day free trial..."').
 # A " | " stands in, so a run never joins the words either side of a script.
 _QUOTED_RE = re.compile(r'"[^"\n]{12,}"|“[^”\n]{12,}”')
+# The emails in your own email rules (writer.email_rules) are fenced ``` blocks,
+# written to be sent word for word: those aren't checked. The rest of that file is.
+_FENCE_RE = re.compile(r"^\s*```.*?^\s*```[^\n]*$", re.S | re.M)
 _leak_cache: dict = {}
 
 
@@ -426,16 +429,39 @@ def _words(text: str) -> list[str]:
     return _WORD_RE.findall((text or "").lower())
 
 
-def _instruction_runs(root) -> dict[tuple, str]:
-    """Every LEAK_RUN_WORDS-word run in Harvey's instructions → its file."""
+def _email_rules_path(config, root) -> str:
+    """The resolved path of your email rules file (writer.email_rules), or ""."""
+    from pathlib import Path
+    raw = str(getattr(getattr(config, "writer", None), "email_rules", "") or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path(root) / path
+    try:
+        return str(path.resolve())
+    except OSError:
+        return ""
+
+
+def _instruction_text(path, spoken: str) -> str:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if spoken and str(path.resolve()) == spoken:
+        text = _FENCE_RE.sub(" | ", text)
+    return text
+
+
+def _instruction_runs(root, spoken: str = "") -> dict[tuple, str]:
+    """Every LEAK_RUN_WORDS-word run in Harvey's instructions → its file.
+    ``spoken`` is your email rules file, whose fenced emails are left out."""
     from harvey.untrusted import UNTRUSTED_RULE
     files = sorted(p for folder in ("prompts", "skills") for p in (root / folder).glob("*.md")
                    if p.name not in _SAY_ALOUD_FILES)
-    key = (str(root), tuple((str(p), p.stat().st_mtime_ns) for p in files))
+    key = (str(root), spoken, tuple((str(p), p.stat().st_mtime_ns) for p in files))
     if _leak_cache.get("key") != key:
         runs: dict[tuple, str] = {}
         sources = [(p.name, _QUOTED_RE.sub(" | ", "\n".join(
-            line for line in p.read_text(encoding="utf-8", errors="replace").splitlines()
+            line for line in _instruction_text(p, spoken).splitlines()
             if not _SCRIPT_LINE_RE.match(line)))) for p in files]
         sources.append(("Harvey's prompt rules", UNTRUSTED_RULE))
         for name, text in sources:
@@ -468,7 +494,8 @@ def autopilot_review(subject: str, body: str, config, root=None, recipient: str 
             f"links to {', '.join(foreign[:3])}, not one of your domains "
             "(add it to channels.email.link_domains if it's yours)")
     words = _words(text)
-    runs = _instruction_runs(root or PROJECT_ROOT)
+    root = root or PROJECT_ROOT
+    runs = _instruction_runs(root, _email_rules_path(config, root))
     for i in range(len(words) - LEAK_RUN_WORDS + 1):
         source = runs.get(tuple(words[i:i + LEAK_RUN_WORDS]))
         if source:

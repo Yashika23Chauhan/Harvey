@@ -252,6 +252,28 @@ def test_a_passage_from_harveys_instructions_is_held(tmp_path):
     assert autopilot_review("hi", "Rival Corp is fine too.", _cfg(), root=tmp_path) == []
 
 
+def test_your_email_rules_emails_are_meant_to_be_sent(tmp_path):
+    """The emails in your own email rules are sent word for word: that isn't a
+    leak. The instructions around them in the same file still are."""
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "skills" / "email_rules.md").write_text(
+        "# Email rules\nNever mention that our onboarding takes six weeks for most new "
+        "customers in any email at all.\n\n## The email\n\n```\nHi {first name},\n\n"
+        "We help agencies take on more client work by building websites behind the "
+        "scenes under their own brand name.\n\nBest regards,\nExample Team\n```\n")
+    cfg = _cfg()
+    cfg.writer = SimpleNamespace(email_rules="skills/email_rules.md")
+    email = ("Hi Sam,\n\nWe help agencies take on more client work by building websites behind "
+             "the scenes under their own brand name.\n\nBest regards,\nExample Team")
+    assert autopilot_review("hi", email, cfg, root=tmp_path) == []
+    leaked = "Never mention that our onboarding takes six weeks for most new customers in any email."
+    [reason] = autopilot_review("hi", leaked, cfg, root=tmp_path)
+    assert "email_rules.md" in reason
+    # Without writer.email_rules pointing at it, the file is checked whole.
+    assert autopilot_review("hi", email, _cfg(), root=tmp_path)
+
+
 # ── where it applies ──
 
 
