@@ -258,7 +258,9 @@ function actionText(a) {
       : 'Searched for leads, nothing new this time';
     case 'manual_reply': return 'You replied to ' + (who || 'a contact');
     case 'conversation_reply_mode': return d.mode === 'auto'
-      ? 'You let AI answer a conversation on its own' : 'You set a conversation to “AI drafts, you approve”';
+      ? 'You let AI answer a conversation on its own'
+      : d.mode === 'manual' ? 'You took over a conversation (AI won’t reply)'
+      : 'You set a conversation to “AI drafts, you approve”';
     case 'lead_approval': return 'You ' + ({approved: 'approved', rejected: 'rejected', pending: 'moved back to waiting'}[d.approval] || escHtml(d.approval || 'changed')) +
       ' ' + n(d.count, 'lead', 'leads');
     case 'write_campaign': return 'Wrote “' + camp + '” for ' + n(d.prospect_count, 'contact', 'contacts');
@@ -3349,7 +3351,8 @@ function convoCard(c) {
     '<div class="tags">' + (c.id && c.prospect_status !== 'opted_out'
       ? '<select class="form-input reply-mode" title="How Harvey answers this customer" onchange="setReplyMode(' + jsq(c.id) + ',this.value)">' +
         '<option value="approve"' + (convoReplyMode(c) === 'approve' ? ' selected' : '') + '>AI drafts · I approve</option>' +
-        '<option value="auto"' + (convoReplyMode(c) === 'auto' ? ' selected' : '') + '>AI replies automatically</option></select>'
+        '<option value="auto"' + (convoReplyMode(c) === 'auto' ? ' selected' : '') + '>AI replies automatically</option>' +
+        '<option value="manual"' + (convoReplyMode(c) === 'manual' ? ' selected' : '') + '>I\'ll manage it myself</option></select>'
       : '') +
       (c.new ? '<span class="tag tag-new">New message</span>' : '') +
       (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
@@ -3802,7 +3805,10 @@ async function setReplyMode(convoId, mode) {
     {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode})});
   if (r && r.success) showToast(mode === 'auto'
     ? 'AI will reply to this customer on its own.'
-    : 'AI will draft replies here; you approve before they go.', 'success');
+    : mode === 'manual'
+      ? 'You manage this conversation: AI won\'t draft or send replies here.' +
+        (r.withdrawn ? ' Its waiting reply was withdrawn.' : '')
+      : 'AI will draft replies here; you approve before they go.', 'success');
   else showToast(failMsg(r, 'Could not change that.'), 'error');
   loadConversations();
 }

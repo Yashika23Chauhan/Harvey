@@ -778,6 +778,10 @@ class Handler:
             (c for c in existing_convos if c.prospect_id == prospect.id), None
         )
         handed_off = stored is not None and stored.status == "needs_human"
+        # "I'll manage it myself" on this conversation: their messages still
+        # land in the thread, but Harvey never drafts or sends an answer.
+        manual = stored is not None and (
+            await self.state.get_setting("reply_mode:" + stored.id)) == "manual"
         if stored is not None:
             convo = stored.model_copy(deep=True)
         else:
@@ -803,7 +807,7 @@ class Handler:
         listed = do_not_contact_match(prospect.email or lead_email,
                                       live_do_not_contact(self.config))
         response = ""
-        if intent in AUTO_REPLY_INTENTS and not held and not listed and not handed_off:
+        if intent in AUTO_REPLY_INTENTS and not held and not listed and not handed_off and not manual:
             response = await self._generate_response(intent, reply_text, prospect, convo)
 
         # 2c. Store the conversation in one write.
@@ -871,6 +875,11 @@ class Handler:
         if handed_off:
             logger.info(f"Handler: {lead_email} wrote again. Added to the conversation "
                         "that's with you; Harvey won't answer.")
+            return
+
+        if manual:
+            logger.info(f"Handler: {lead_email} wrote again. You manage this conversation "
+                        "yourself; Harvey won't answer.")
             return
 
         if listed:

@@ -265,3 +265,12 @@ def test_reply_mode_default_follows_the_sending_mode(client, monkeypatch):
     monkeypatch.setattr(dash, "_require_approval_now", lambda: True)
     [convo] = client.get("/api/conversations").json()
     assert convo["reply_mode_default"] == "approve"
+
+
+def test_managing_it_yourself_withdraws_harveys_waiting_reply(client):
+    _seed(client.db_path)          # c1 has Harvey's draft o4 waiting for approval
+    r = client.post("/api/conversations/c1/mode", json={"mode": "manual"}).json()
+    assert r == {"success": True, "mode": "manual", "withdrawn": 1}
+    [convo] = client.get("/api/conversations").json()
+    assert convo["reply_mode"] == "manual" and convo["draft"] is None
+    assert client.post("/api/conversations/c1/mode", json={"mode": "bogus"}).status_code == 400

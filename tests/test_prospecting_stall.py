@@ -322,3 +322,31 @@ async def test_a_campaign_waits_when_replies_could_not_be_read(state, monkeypatc
     main_mod = _instantly_with_a_draft_and_an_open_conversation(monkeypatch, state, calls, stop, False)
     await asyncio.wait_for(main_mod.heartbeat(stop), timeout=30)
     assert calls == ["replies"]
+
+
+# ── "I'll manage it myself" ──
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_you_manage_gets_no_answer_but_keeps_the_messages(tmp_path, monkeypatch):
+    state, handler, pid = await _handler(tmp_path, monkeypatch, ["interested", "question"])
+    await handler._process_reply("jane@acme.example", "Tell me more.", "u1")
+    assert len(await state.get_outbox()) == 1          # Harvey answered the first one
+    convo = (await state.get_conversations_by_status("open"))[0]
+    await state.set_setting("reply_mode:" + convo.id, "manual")
+
+    await handler._process_reply("jane@acme.example", "What does it cost?", "u2")
+    assert len(await state.get_outbox()) == 1          # nothing new drafted or sent
+    [convo] = await _all_conversations(state)
+    assert [m.content for m in convo.thread if m.sender == "prospect"] == [
+        "Tell me more.", "What does it cost?"]
+
+
+@pytest.mark.asyncio
+async def test_an_opt_out_in_a_conversation_you_manage_still_opts_out(tmp_path, monkeypatch):
+    state, handler, pid = await _handler(tmp_path, monkeypatch, ["interested", "unsubscribe"])
+    await handler._process_reply("jane@acme.example", "Tell me more.", "u1")
+    convo = (await state.get_conversations_by_status("open"))[0]
+    await state.set_setting("reply_mode:" + convo.id, "manual")
+    await handler._process_reply("jane@acme.example", "Please take me off your list.", "u2")
+    assert (await state.get_prospect(pid)).status == "opted_out"

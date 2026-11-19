@@ -1904,7 +1904,7 @@ async def set_conversation_status(convo_id: str, request: Request):
     return {"success": True, "status": status}
 
 
-REPLY_MODE_KEY = "reply_mode:"   # + conversation id -> "auto" | "approve"
+REPLY_MODE_KEY = "reply_mode:"   # + conversation id -> "auto" | "approve" | "manual"
 CONVO_SEEN_KEY = "convo_seen:"   # + conversation id -> time of the last customer message you opened
 
 
@@ -1959,15 +1959,17 @@ async def mark_conversation_seen(convo_id: str):
 
 @app.post("/api/conversations/{convo_id}/mode")
 async def set_conversation_reply_mode(convo_id: str, request: Request):
-    """Per conversation: Harvey answers new replies on its own ("auto"), or
-    drafts them for you to approve ("approve"). "" follows Settings."""
+    """Per conversation: Harvey answers new replies on its own ("auto"),
+    drafts them for you to approve ("approve"), or leaves them to you
+    ("manual": no drafts, no answers). "" follows Settings."""
     try:
         data = await request.json()
     except Exception:
         data = {}
     mode = (data or {}).get("mode", "") if isinstance(data, dict) else ""
-    if mode not in ("auto", "approve", ""):
-        return JSONResponse({"success": False, "message": "mode must be auto or approve"}, status_code=400)
+    if mode not in ("auto", "approve", "manual", ""):
+        return JSONResponse({"success": False, "message": "mode must be auto, approve or manual"},
+                            status_code=400)
     if not await query_db("SELECT id FROM conversations WHERE id = ?", (convo_id,)):
         return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
     state = _state()
@@ -1975,8 +1977,17 @@ async def set_conversation_reply_mode(convo_id: str, request: Request):
         await state.set_setting(REPLY_MODE_KEY + convo_id, mode)
     else:
         await state.delete_setting(REPLY_MODE_KEY + convo_id)
-    await state.log_action("conversation_reply_mode", "dashboard", {"conversation_id": convo_id, "mode": mode})
-    return {"success": True, "mode": mode}
+    withdrawn = 0
+    if mode == "manual":
+        # Harvey's answers still waiting here go too; replies you wrote stay.
+        for item in await query_db(
+                "SELECT id FROM outbox WHERE conversation_id = ? AND kind = 'reply' "
+                "AND status IN ('pending_review', 'approved') AND COALESCE(campaign_id, '') != 'manual-reply'",
+                (convo_id,)):
+            withdrawn += await state.reject_outbox_item(item["id"])
+    await state.log_action("conversation_reply_mode", "dashboard",
+                           {"conversation_id": convo_id, "mode": mode, "withdrawn": withdrawn})
+    return {"success": True, "mode": mode, "withdrawn": withdrawn}
 
 
 async def _unanswered_conversation_ids() -> set[str]:
