@@ -3342,7 +3342,6 @@ function convoCard(c) {
         '<div class="convo-reply-actions"><button class="btn btn-primary btn-sm" onclick="sendReply(' + jsq(c.id) + ',this)">Send reply</button></div></div>'
       : '';
   const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company || 'Unknown';
-  const stage = own(STAGE_LABELS, c.stage) ? '<span class="tag">' + STAGE_LABELS[c.stage] + '</span>' : '';
   return '<div class="convo-card"><div class="convo-head">' +
     '<span class="avatar">' + initials(c.first_name, c.last_name) + '</span>' +
     '<div><h3>' + escHtml(name) + '</h3><div class="sub">' +
@@ -3354,9 +3353,8 @@ function convoCard(c) {
         '<option value="auto"' + (convoReplyMode(c) === 'auto' ? ' selected' : '') + '>AI replies automatically</option>' +
         '<option value="manual"' + (convoReplyMode(c) === 'manual' ? ' selected' : '') + '>I\'ll manage it myself</option></select>'
       : '') +
-      (c.new ? '<span class="tag tag-new">New message</span>' : '') +
-      (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
-      stage + badge(c.status) + '</div></div>' +
+      // No intent, stage or status labels here: the dropdown is the only control.
+      '</div></div>' +
     '<div class="thread">' + ((thread + sending) || '<p class="muted" style="font-size:13px">No messages in this thread yet.</p>') +
     draft + '</div>' + convoActions(c) + '</div>';
 }
