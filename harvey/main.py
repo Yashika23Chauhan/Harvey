@@ -136,6 +136,12 @@ def unusable_backlog_notice(summary: dict) -> str:
     )
 
 
+def campaigns_off() -> bool:
+    """HARVEY_NO_CAMPAIGNS=1 stops writing and sending campaign emails (for
+    testing); prospecting, website scans and reading replies still run."""
+    return os.environ.get("HARVEY_NO_CAMPAIGNS", "").strip() == "1"
+
+
 async def decide_next_action(
     brain: Brain,
     state: StateManager,
@@ -434,7 +440,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                 # Analyst is cheap (no Claude calls) — keep analytics fresh
                 tasks.append(("analyze", analyst.run()))
             elif action == "write_campaign":
-                tasks.append(("write_campaign", writer.run()))
+                # HARVEY_NO_CAMPAIGNS=1 (testing): no emails are written or sent.
+                if campaigns_off():
+                    logger.info("Campaigns are off (HARVEY_NO_CAMPAIGNS=1): not writing emails.")
+                    tasks.append(("analyze", analyst.run()))
+                else:
+                    tasks.append(("write_campaign", writer.run()))
             elif action == "idle":
                 tasks.append(("analyze", analyst.run()))
 
@@ -445,7 +456,9 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # read every cycle too; any provider is read while a conversation
             # is open.
             send_tasks = []
-            if action == "send_campaign":
+            if campaigns_off():
+                pass                       # testing: nothing leaves the outbox
+            elif action == "send_campaign":
                 send_tasks.append(("send_campaign", sender.run))
             elif sender.is_native:
                 send_tasks.append(("send_outbox", sender.run))
