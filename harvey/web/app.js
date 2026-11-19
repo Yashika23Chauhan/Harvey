@@ -3626,9 +3626,10 @@ function renderFoundLeads() {
   const start = _foundPage * FOUND_PER_PAGE;
   const pageRows = rows.slice(start, start + FOUND_PER_PAGE);
   const allOn = pageRows.every(l => _foundSelected.has(l.id));
+  // Unchecked ("guess") addresses carry no tag in this list; checked ones do.
   const emailTag = s => {
-    const cls = {verified: 'verified', risky: 'risky', invalid: 'invalid'}[s] || 'guess';
-    return s ? '<span class="email-tag ' + cls + '">' + escHtml(s) + '</span>' : '';
+    const cls = {verified: 'verified', risky: 'risky', invalid: 'invalid'}[s];
+    return s && cls ? '<span class="email-tag ' + cls + '">' + escHtml(s) + '</span>' : '';
   };
   const approvalTag = a => '<span class="email-tag ' + ({approved: 'verified', rejected: 'invalid', pending: 'risky'}[a] || 'guess') + '">' +
     ({approved: 'approved', rejected: 'rejected', pending: 'waiting'}[a] || escHtml(a)) + '</span>';
