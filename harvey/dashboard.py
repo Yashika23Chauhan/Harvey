@@ -1828,10 +1828,15 @@ async def get_conversations(awaiting: bool = False):
              "content": o["body"], "timestamp": o["created_at"]})
     modes = {m["key"][len("reply_mode:"):]: m["value"] for m in await query_db(
         "SELECT key, value FROM settings WHERE key LIKE 'reply_mode:%'")}
+    seen = await _convo_seen()
+    # What a conversation with no choice of its own does: Settings → Sending.
+    default_mode = "approve" if _require_approval_now() else "auto"
     for row in rows:
         row["new"] = row["id"] in unanswered
+        row["unseen"] = _is_unseen(row.get("thread"), seen.get(row["id"], ""))
         row["outgoing"] = outgoing.get(row["id"], [])
         row["reply_mode"] = modes.get(row["id"], "")
+        row["reply_mode_default"] = default_mode
     if awaiting:
         rows += await _awaiting_reply()
     return rows
@@ -1900,6 +1905,56 @@ async def set_conversation_status(convo_id: str, request: Request):
 
 
 REPLY_MODE_KEY = "reply_mode:"   # + conversation id -> "auto" | "approve"
+CONVO_SEEN_KEY = "convo_seen:"   # + conversation id -> time of the last customer message you opened
+
+
+def _last_prospect_ts(thread) -> str:
+    """When the customer last wrote in this thread, or ""."""
+    times = [str(m.get("timestamp") or "") for m in (thread or [])
+             if isinstance(m, dict) and m.get("sender") == "prospect"]
+    return max(times) if times else ""
+
+
+def _is_unseen(thread, seen: str) -> bool:
+    """The customer wrote something you haven't opened yet."""
+    last = _last_prospect_ts(thread)
+    return bool(last) and last > (seen or "")
+
+
+async def _convo_seen() -> dict[str, str]:
+    return {r["key"][len(CONVO_SEEN_KEY):]: r["value"] or "" for r in await query_db(
+        "SELECT key, value FROM settings WHERE key LIKE ?", (CONVO_SEEN_KEY + "%",))}
+
+
+async def _unseen_conversation_ids() -> set[str]:
+    """Conversations with a customer message you haven't opened (the
+    Conversations badge), whether or not Harvey has answered it."""
+    seen = await _convo_seen()
+    out = set()
+    for r in await query_db("SELECT id, thread_json FROM conversations"):
+        try:
+            thread = json.loads(r.get("thread_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if _is_unseen(thread, seen.get(r["id"], "")):
+            out.add(r["id"])
+    return out
+
+
+@app.post("/api/conversations/{convo_id}/seen")
+async def mark_conversation_seen(convo_id: str):
+    """You opened this conversation: its messages so far are seen."""
+    rows = await query_db("SELECT thread_json FROM conversations WHERE id = ?", (convo_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    try:
+        thread = json.loads(rows[0].get("thread_json") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        thread = []
+    last = _last_prospect_ts(thread)
+    if last:
+        await _state().set_setting(CONVO_SEEN_KEY + convo_id, last)
+    return {"success": True, "unseen": len(await _unseen_conversation_ids())}
 
 
 @app.post("/api/conversations/{convo_id}/mode")
@@ -3130,6 +3185,7 @@ async def get_today():
         )
         needs_human = handed[0]["n"] if handed else 0
         unanswered = await _unanswered_conversation_ids()
+        unseen = await _unseen_conversation_ids()
         companies = await query_db("SELECT COUNT(*) AS n FROM companies")
         n_companies = companies[0]["n"] if companies else 0
 
@@ -3146,6 +3202,7 @@ async def get_today():
             "open_conversations": open_convos,
             "needs_human": needs_human,
             "conversations_new": len(unanswered),
+            "conversations_unseen": len(unseen),
             "signals_proposed": len(proposed),
             "email_provider": _current_provider(),
             "unprofiled": unprofiled_count,

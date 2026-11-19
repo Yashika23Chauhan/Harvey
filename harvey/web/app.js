@@ -3175,11 +3175,12 @@ const CONVO_FILTERS = [
   ['all', 'All', () => true],
 ];
 
-async function loadConversations() {
+async function loadConversations(listOnly) {
   const el = document.getElementById('conversations-list');
   const data = await api('/api/conversations?awaiting=1');
-  if (!data) { el.innerHTML = offlineState(); return; }
+  if (!data) { if (!listOnly) el.innerHTML = offlineState(); return; }
   _convos = data;
+  if (listOnly && document.querySelector('.convo-list')) { renderConvoList(); return; }
   if (!data.length) {
     el.innerHTML = emptyState(icon('conversations'), 'No conversations yet',
       'No prospects have replied so far. When they do, the Handler agent classifies each reply and responds — every thread shows up here.');
@@ -3193,47 +3194,90 @@ async function loadConversations() {
 
 function setConvoFilter(f) { _convoFilter = f; renderConversations(); }
 
-function renderConversations() {
-  const el = document.getElementById('conversations-list');
-  const filter = CONVO_FILTERS.find(f => f[0] === _convoFilter) || CONVO_FILTERS[CONVO_FILTERS.length - 1];
-  const bar = '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
+const convoKey = c => c.id || ('await-' + (c.prospect_email || ''));
+
+function convoFilterBar(filter) {
+  return '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
     CONVO_FILTERS.map(f => '<button class="' + (f[0] === filter[0] ? 'on' : '') + '" aria-pressed="' + (f[0] === filter[0]) +
       '" onclick="setConvoFilter(\'' + f[0] + '\')">' + f[1] + ' <span class="n">' +
       _convos.filter(f[2]).length + '</span></button>').join('') + '</div></div>';
-  // Handed-to-you first, then drafts waiting; otherwise newest first (as served).
-  const rank = c => c.status === 'needs_human' ? 0 : c.new ? 1 : c.draft ? 2 : 3;
-  const shown = _convos.filter(filter[2]).map((c, i) => [c, i])
+}
+
+// The conversations the current filter shows, in order.
+function shownConvos(filter) {
+  // Handed-to-you first, then unread, then drafts waiting; otherwise newest first (as served).
+  const rank = c => c.status === 'needs_human' ? 0 : (c.new || c.unseen) ? 1 : c.draft ? 2 : 3;
+  return _convos.filter(filter[2]).map((c, i) => [c, i])
     .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(x => x[0]);
+}
+
+function convoListHtml(shown) {
+  return shown.map(c => {
+    const last = convoLastMessage(c);
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company || c.prospect_email || 'Unknown';
+    const unread = c.new || c.unseen;
+    return '<button class="convo-item' + (convoKey(c) === _convoSelected ? ' on' : '') + (unread ? ' unread' : '') +
+      '" onclick="selectConvo(' + jsq(convoKey(c)) + ')">' +
+      '<span class="avatar">' + initials(c.first_name, c.last_name) + '</span>' +
+      '<span class="ci-main"><span class="ci-top"><b>' + escHtml(name) + '</b>' +
+        '<span class="ci-when">' + (last.ts ? relTime(last.ts) : '') + '</span></span>' +
+      '<span class="ci-preview">' + escHtml(last.text) + '</span></span>' +
+      (unread ? '<span class="ci-dot" title="New message"></span>' : c.draft ? '<span class="ci-draft">Draft</span>' : '') +
+      '</button>';
+  }).join('');
+}
+
+// Refresh just the list on the left (and the filter counts), leaving the open
+// thread and anything typed in it alone.
+function renderConvoList() {
+  const filter = CONVO_FILTERS.find(f => f[0] === _convoFilter) || CONVO_FILTERS[CONVO_FILTERS.length - 1];
+  const listEl = document.querySelector('.convo-list');
+  const bar = document.querySelector('#conversations-list > .toolbar');
+  if (!listEl) return renderConversations();
+  const keep = listEl.scrollTop;
+  listEl.innerHTML = convoListHtml(shownConvos(filter));
+  listEl.scrollTop = keep;
+  if (bar) bar.outerHTML = convoFilterBar(filter);
+}
+
+function renderConversations() {
+  const el = document.getElementById('conversations-list');
+  const filter = CONVO_FILTERS.find(f => f[0] === _convoFilter) || CONVO_FILTERS[CONVO_FILTERS.length - 1];
+  const bar = convoFilterBar(filter);
+  const shown = shownConvos(filter);
   if (!shown.length) {
     el.innerHTML = bar + '<div class="card">' + emptyState(icon('check'), 'Nothing here',
       'No conversation matches this filter.') + '</div>';
     return;
   }
-  const key = c => c.id || ('await-' + (c.prospect_email || ''));
-  if (!shown.some(c => key(c) === _convoSelected)) _convoSelected = key(shown[0]);
-  const selected = shown.find(c => key(c) === _convoSelected);
+  if (!shown.some(c => convoKey(c) === _convoSelected)) _convoSelected = convoKey(shown[0]);
+  const selected = shown.find(c => convoKey(c) === _convoSelected);
   // Keep the open thread's scroll across the 5-second refresh; follow new
   // messages only when you were already at the bottom.
   const oldPane = document.querySelector('.convo-pane');
   const wasAtBottom = !oldPane || oldPane.scrollHeight - oldPane.scrollTop - oldPane.clientHeight < 40;
   const keepScroll = oldPane && oldPane.dataset.key === _convoSelected ? oldPane.scrollTop : null;
-  const list = shown.map(c => {
-    const last = convoLastMessage(c);
-    const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.company || c.prospect_email || 'Unknown';
-    return '<button class="convo-item' + (key(c) === _convoSelected ? ' on' : '') + (c.new ? ' unread' : '') +
-      '" onclick="selectConvo(' + jsq(key(c)) + ')">' +
-      '<span class="avatar">' + initials(c.first_name, c.last_name) + '</span>' +
-      '<span class="ci-main"><span class="ci-top"><b>' + escHtml(name) + '</b>' +
-        '<span class="ci-when">' + (last.ts ? relTime(last.ts) : '') + '</span></span>' +
-      '<span class="ci-preview">' + escHtml(last.text) + '</span></span>' +
-      (c.new ? '<span class="ci-dot" title="New message"></span>' : c.draft ? '<span class="ci-draft">Draft</span>' : '') +
-      '</button>';
-  }).join('');
-  el.innerHTML = bar + '<div class="convo-layout"><div class="convo-list">' + list + '</div>' +
+  el.innerHTML = bar + '<div class="convo-layout"><div class="convo-list">' + convoListHtml(shown) + '</div>' +
     '<div class="convo-pane" data-key="' + escHtml(_convoSelected) + '">' + convoCard(selected) + '</div></div>';
   const pane = el.querySelector('.convo-pane');
   if (keepScroll !== null && !wasAtBottom) pane.scrollTop = keepScroll;
   else pane.scrollTop = pane.scrollHeight;
+  markConvoSeen(selected);
+}
+
+// The open conversation's messages count as read once it's on screen.
+async function markConvoSeen(c) {
+  if (!c || !c.id || !c.unseen || document.hidden || currentTab !== 'conversations') return;
+  c.unseen = false;
+  const res = await api('/api/conversations/' + encodeURIComponent(c.id) + '/seen',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+  if (res) refreshNavCounts();
+  const item = document.querySelector('.convo-item.on');
+  if (item && !c.new) {
+    item.classList.remove('unread');
+    const dot = item.querySelector('.ci-dot');
+    if (dot) dot.remove();
+  }
 }
 
 let _convoSelected = '';
@@ -3242,6 +3286,12 @@ function selectConvo(k) {
   if (replyInProgress() && !confirm('Discard the reply you were writing?')) return;
   _convoSelected = k;
   renderConversations();
+}
+
+// How Harvey answers this customer: its own choice, else what Settings → Sending
+// does (autopilot replies on its own, approval mode drafts for you).
+function convoReplyMode(c) {
+  return c.reply_mode || c.reply_mode_default || 'approve';
 }
 
 // The newest thing in a thread, for the list preview.
@@ -3298,8 +3348,8 @@ function convoCard(c) {
     // An escalation's intent badge says the same as its status: show one.
     '<div class="tags">' + (c.id && c.prospect_status !== 'opted_out'
       ? '<select class="form-input reply-mode" title="How Harvey answers this customer" onchange="setReplyMode(' + jsq(c.id) + ',this.value)">' +
-        '<option value="approve"' + (c.reply_mode !== 'auto' ? ' selected' : '') + '>AI drafts · I approve</option>' +
-        '<option value="auto"' + (c.reply_mode === 'auto' ? ' selected' : '') + '>AI replies automatically</option></select>'
+        '<option value="approve"' + (convoReplyMode(c) === 'approve' ? ' selected' : '') + '>AI drafts · I approve</option>' +
+        '<option value="auto"' + (convoReplyMode(c) === 'auto' ? ' selected' : '') + '>AI replies automatically</option></select>'
       : '') +
       (c.new ? '<span class="tag tag-new">New message</span>' : '') +
       (c.intent && !(c.status === 'needs_human' && c.intent === 'escalate') ? badge(c.intent) : '') +
@@ -3757,9 +3807,11 @@ async function setReplyMode(convoId, mode) {
 }
 
 // New customer messages nobody has answered, or threads handed to you.
+// Conversations with a customer message you haven't opened yet (even if
+// Harvey already answered it), or handed to you.
 function convoBadge(stats) {
   const s = stats || {};
-  return Math.max(s.conversations_new || 0, s.needs_human || 0);
+  return Math.max(s.conversations_unseen || 0, s.needs_human || 0);
 }
 
 // A reply being typed or edited must survive the tab's auto-refresh.
@@ -3951,18 +4003,24 @@ setInterval(() => {
 
 // Nav counts stay live wherever you are, so "something needs me" is visible
 // from any tab without polling that tab's contents.
-setInterval(async () => {
-  if (document.hidden || _locked || currentTab === 'today') return;
+async function refreshNavCounts() {
+  if (_locked) return;
   const data = await api('/api/today');
   if (!data) return;
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-conversations', convoBadge(data.stats));
-}, 20000);
+}
+setInterval(() => {
+  if (document.hidden || _locked || currentTab === 'today') return;
+  refreshNavCounts();
+}, 10000);
 
 // The Conversations tab follows new messages and your replies as they land.
+// While you're typing a reply only the list on the left refreshes, so a new
+// message still shows up without touching what you're writing.
 setInterval(() => {
-  if (!document.hidden && !_locked && currentTab === 'conversations' && !replyInProgress()) loadConversations();
+  if (!document.hidden && !_locked && currentTab === 'conversations') loadConversations(replyInProgress());
 }, 5000);
 
 // Data tabs: auto-refresh live views without clobbering anything in progress.
@@ -3975,7 +4033,7 @@ setInterval(() => {
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
-    case 'conversations': if (!replyInProgress()) loadConversations(); break;
+    case 'conversations': break;  // its own 5-second refresh above
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'leads': if (_leadsPane === 'controls') loadLogs(); break;

@@ -223,3 +223,45 @@ def test_an_escalation_from_someone_who_opted_out_cant_be_handed_back():
     html = _render_actions({"id": "c2", "status": "needs_human", "prospect_status": "replied",
                             "prospect_id": "p2", "prospect_email": "b@x.test"})
     assert "Hand back to Harvey" in html and "Why opted out?" not in html
+
+
+def test_unseen_until_you_open_it_even_once_harvey_answered(client):
+    """The Conversations badge counts customer messages you haven't opened,
+    whether or not Harvey already answered them."""
+    _seed(client.db_path)
+    answered = [{"sender": "prospect", "content": "What does it cost?", "timestamp": "2026-10-18T10:00:00"},
+                {"sender": "harvey", "content": "It's $49 a month.", "timestamp": "2026-10-18T10:01:00"}]
+    _sql(client.db_path, "UPDATE conversations SET thread_json = ? WHERE id = 'c1'", (json.dumps(answered),))
+    [convo] = client.get("/api/conversations").json()
+    assert convo["unseen"] is True
+    assert client.get("/api/today").json()["stats"]["conversations_unseen"] == 1
+
+    r = client.post("/api/conversations/c1/seen", json={})
+    assert r.json() == {"success": True, "unseen": 0}
+    [convo] = client.get("/api/conversations").json()
+    assert convo["unseen"] is False
+    assert client.get("/api/today").json()["stats"]["conversations_unseen"] == 0
+
+    # Their next message is unseen again.
+    answered.append({"sender": "prospect", "content": "Any discount?", "timestamp": "2026-10-18T12:00:00"})
+    _sql(client.db_path, "UPDATE conversations SET thread_json = ? WHERE id = 'c1'", (json.dumps(answered),))
+    [convo] = client.get("/api/conversations").json()
+    assert convo["unseen"] is True
+
+
+def test_seen_for_a_missing_conversation(client):
+    asyncio.run(StateManager(str(client.db_path)).init_db())
+    assert client.post("/api/conversations/nope/seen", json={}).status_code == 404
+
+
+def test_reply_mode_default_follows_the_sending_mode(client, monkeypatch):
+    """A conversation with no choice of its own shows what Settings → Sending
+    does, so the dropdown never says "I approve" while Harvey sends."""
+    import harvey.dashboard as dash
+    _seed(client.db_path)
+    monkeypatch.setattr(dash, "_require_approval_now", lambda: False)
+    [convo] = client.get("/api/conversations").json()
+    assert convo["reply_mode"] == "" and convo["reply_mode_default"] == "auto"
+    monkeypatch.setattr(dash, "_require_approval_now", lambda: True)
+    [convo] = client.get("/api/conversations").json()
+    assert convo["reply_mode_default"] == "approve"

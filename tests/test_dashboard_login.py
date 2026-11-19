@@ -45,7 +45,8 @@ def signup(client, username="demo", password="correct horse"):
 
 
 def test_status_says_when_no_account_exists(client):
-    assert client.get("/auth/status").json() == {"has_users": False, "signup_open": True}
+    status = client.get("/auth/status").json()
+    assert {k: status[k] for k in ("has_users", "signup_open")} == {"has_users": False, "signup_open": True}
     signup(client)
     assert client.get("/auth/status").json() == {"has_users": True, "signup_open": False}
 
