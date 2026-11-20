@@ -1345,7 +1345,7 @@ function tplRead() {
 }
 
 function tplFill(text) {
-  const fill = {'{first name}': TPL_SAMPLE.first, '{agency name}': TPL_SAMPLE.agency,
+  const fill = {'{first name}': TPL_SAMPLE.first, '{agency name}': TPL_SAMPLE.agency, '{company}': TPL_SAMPLE.agency,
                 '{sender name}': (_tplSender.name || 'Sam').split(' ')[0],
                 '{website issues}': 'hidden links to other websites on your homepage',
                 '{report link}': 'https://sitewatch.example/report/sample'};
@@ -1417,6 +1417,7 @@ function tplInsert(token) {
 function tplRenderChips() {
   const help = {'{first name}': 'Their first name. Left out for a team inbox.',
                 '{agency name}': 'Their agency\'s name, or "your agency" if unknown.',
+                '{company}': 'Their company\'s name, or "your business" if unknown.',
                 '{sender name}': 'Your first name.',
                 '{website issues}': 'Problems a SiteWatch scan found on their site. The sentence is dropped when there are none.',
                 '{report link}': 'Link to the public SiteWatch report. The sentence is dropped when there is none.'};

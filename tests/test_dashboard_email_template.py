@@ -266,3 +266,10 @@ def test_saving_and_previewing_report_the_spam_check(client, monkeypatch):
     monkeypatch.setattr(writer_mod.Writer, "_write_personal_email", fake_write)
     body = client.post("/api/email-template/preview", json={"content": TEMPLATE, "prospect_id": "p1"}).json()
     assert any(f["level"] == "high" for f in body["spam_check"])
+
+
+def test_company_placeholder_is_explained_in_the_rules():
+    rules = email_template.render({"mode": "exact", "emails": [
+        {"subject": "Website audit report for {company}", "body": "Hi {first name},\n\nA short note.\n\nBest,\nTeam"}]})
+    assert "`{company}`" in rules and "your business" in rules
+    assert 'Subject: exactly "Website audit report for {company}" (fill in placeholders).' in rules

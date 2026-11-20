@@ -95,6 +95,7 @@ def test_words_inside_other_words_dont_count():
 
 @pytest.mark.parametrize("link,expect", [
     ("https://staging.example.com/r/1", "staging server"),
+    ("https://reports.example-stagingwork.com/r/1", "staging server"),
     ("https://example-dev.example.com/r/1", "staging server"),
     ("http://10.0.0.7/r/1", "staging server"),
     ("https://reports.example.com/r/AbCdEfGhIjKlMnOpQrStUvWxYz123", "random code"),

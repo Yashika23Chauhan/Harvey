@@ -35,7 +35,9 @@ _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _BULLET_RE = re.compile(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S")
 _WORD_RE = re.compile(r"[A-Za-z0-9'%]+")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
-_TEST_HOST_RE = re.compile(r"(?:^|[.-])(?:staging|stage|test|dev|demo|sandbox|localhost)(?:[.-]|$)")
+# "staging" anywhere in a host name reads as a test server ("wp-stagingwork");
+# the shorter words only as their own part of the name ("dev.", "-test.").
+_TEST_HOST_RE = re.compile(r"staging|(?:^|[.-])(?:stage|test|dev|demo|sandbox|localhost)(?:[.-]|$)")
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 

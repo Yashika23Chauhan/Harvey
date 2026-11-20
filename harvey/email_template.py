@@ -13,6 +13,8 @@ PLACEHOLDERS = {
     "{first name}": "the person's first name. With no first name (a team inbox), "
                     "drop it and the space or comma before it, e.g. \"Hi {first name},\" becomes \"Hi,\".",
     "{agency name}": "their agency's name as its own website writes it. If unknown, write \"your agency\".",
+    "{company}": "the company's name as its own website writes it, without \"Pty Ltd\", \"LLC\" and "
+                 "the like. If unknown, write \"your business\".",
     "{sender name}": "the sender's first name.",
     "{website issues}": "one or two problems the FACTS list on their website, in plain words, as "
                         "something a scan flagged. If the FACTS list none, drop the whole sentence "
