@@ -67,6 +67,8 @@ def test_the_brochure_template_is_flagged_for_everything_that_sinks_it():
 
 def test_a_short_plain_email_passes():
     assert spam_signals(PLAIN_SUBJECT, PLAIN_BODY) == []
+    # A template's {placeholder} in the subject isn't a bracket.
+    assert spam_signals("Website audit report for {company}", "Hi {first name}, a short note.") == []
     assert summary([]) == "Nothing in the wording looks like spam."
 
 

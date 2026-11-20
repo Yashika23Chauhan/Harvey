@@ -67,7 +67,7 @@ def spam_signals(subject: str, body: str) -> list[dict]:
         out.append({"level": level, "issue": issue, "fix": fix})
 
     # Subject
-    if re.search(r"[\[\]{}]", subject):
+    if re.search(r"[\[\]{}]", re.sub(r"\{[a-z ]+\}", "", subject)):   # a {placeholder} isn't a bracket
         add("medium", "The subject has brackets, which read like a newsletter or an automated email.",
             "Write it like a person would, e.g. \"Website audit report for {company}\".")
     if "!" in subject:
