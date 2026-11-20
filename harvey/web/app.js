@@ -1482,7 +1482,9 @@ async function postTemplate(payload, btn, okMsg) {
   const r = await api('/api/email-template', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)});
   if (r && r.success) {
-    showToast(okMsg, 'success');
+    const risky = (r.spam_check || []).some(f => f.level !== 'low');
+    showToast(okMsg + (r.spam_summary ? ' ' + r.spam_summary : '') + (risky ? ' Preview a draft to see what to change.' : ''),
+      risky ? 'error' : 'success');
     _tpl = null;  // reload everything from what was saved
     await loadTemplate(true);
   } else {
@@ -1526,7 +1528,19 @@ async function previewTemplate(btn) {
   mail.innerHTML = tplMailHtml(
     escHtml(to.name || '') + (to.company ? ' <span class="muted">· ' + escHtml(to.company) + '</span>' : '') +
       (to.email_status ? ' <span class="email-tag ' + escHtml(to.email_status) + '">' + escHtml(to.email_status) + '</span>' : ''),
-    r.subject, r.body, false);
+    r.subject, r.body, false) + spamCheckHtml(r.spam_check);
+}
+
+// What in an email's wording looks like spam (harvey/spam_check.py).
+function spamCheckHtml(findings) {
+  if (!Array.isArray(findings)) return '';
+  if (!findings.length) return '<div class="spam-check ok">' + icon('check') + 'Spam check: nothing in the wording looks like spam.</div>';
+  const tone = {high: 'invalid', medium: 'risky', low: 'guess'};
+  const label = {high: 'serious', medium: 'look at', low: 'minor'};
+  return '<div class="spam-check"><b>Spam check</b><ul>' + findings.map(f =>
+    '<li><span class="email-tag ' + (tone[f.level] || 'guess') + '">' + escHtml(label[f.level] || f.level) + '</span>' +
+    '<span>' + escHtml(f.issue) + ' <span class="muted">' + escHtml(f.fix) + '</span></span></li>').join('') +
+    '</ul><p class="muted">Wording is one part of it: a new sending address lands in spam until it has a history, whatever it says.</p></div>';
 }
 
 // ── API Integration ──

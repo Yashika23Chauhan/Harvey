@@ -2853,7 +2853,10 @@ async def save_email_template(request: Request):
     state = _state()
     await state.init_db()
     await state.delete_setting(EMAIL_RULES_PROBLEM_KEY)  # a fixed template clears the warning
-    return {"success": True, "path": rel}
+    from harvey.spam_check import spam_signals, summary
+    first = ((editor or {}).get("emails") or [{}])[0]
+    check = spam_signals(first.get("subject", ""), first.get("body", "")) if editor else []
+    return {"success": True, "path": rel, "spam_check": check, "spam_summary": summary(check) if editor else ""}
 
 
 @app.post("/api/email-template/preview")
@@ -2897,7 +2900,9 @@ async def preview_email_template(request: Request):
     draft = await writer._write_personal_email(prospect)
     if not draft:
         return JSONResponse({"success": False, "message": "Claude didn't return a draft. Try again."}, status_code=502)
+    from harvey.spam_check import spam_signals
     return {"success": True, "subject": draft["subject"], "body": draft["body"],
+            "spam_check": spam_signals(draft["subject"], draft["body"]),
             "to": {"name": prospect.full_name().strip() or "General inbox", "company": prospect.company,
                    "email_status": prospect.email_status or ""}}
 

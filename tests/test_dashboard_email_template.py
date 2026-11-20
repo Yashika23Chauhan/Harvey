@@ -241,3 +241,28 @@ async def test_writer_writes_only_as_many_emails_as_configured(follow_ups, expec
     if expected == 1:
         assert "ONE cold outreach email (no follow-ups)" in prompts[0]
         assert '"step": 2' not in prompts[0]
+
+
+def test_saving_and_previewing_report_the_spam_check(client, monkeypatch):
+    """Saving from the editor, and every preview, say what in the wording looks like spam."""
+    spammy = {"mode": "exact", "emails": [
+        {"subject": "[News] free audit", "body": "Hi {first name},\n\nA 100% FOC audit.\n\nBest,\n{sender name}"},
+        {"subject": "", "body": ""}, {"subject": "", "body": ""}]}
+    r = client.post("/api/email-template", json={"editor": spammy}).json()
+    assert r["success"] and "serious" in r["spam_summary"]
+    assert {f["level"] for f in r["spam_check"]} >= {"high", "medium"}
+    clean = client.post("/api/email-template", json={"editor": EDITOR}).json()
+    assert clean["spam_check"] == [] and clean["spam_summary"].startswith("Nothing")
+
+    lead = SimpleNamespace(id="p1", company="Acme Studio", email_status="verified", full_name=lambda: "Jane Doe")
+
+    async def fake_get(self, pid):
+        return lead
+
+    async def fake_write(self, prospect):
+        return {"subject": "[Offer] 100% free", "body": "Hi Jane,"}
+
+    monkeypatch.setattr(state_mod.StateManager, "get_prospect", fake_get)
+    monkeypatch.setattr(writer_mod.Writer, "_write_personal_email", fake_write)
+    body = client.post("/api/email-template/preview", json={"content": TEMPLATE, "prospect_id": "p1"}).json()
+    assert any(f["level"] == "high" for f in body["spam_check"])

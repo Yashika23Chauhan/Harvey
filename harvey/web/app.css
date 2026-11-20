@@ -1236,6 +1236,12 @@ a.btn, a.btn:hover { text-decoration: none; }
 .tpl-mail-row b { font-weight: 500; overflow-wrap: anywhere; }
 .tpl-mail-subject b { font-weight: 600; }
 .tpl-mail-body { padding: var(--sp-4); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.65; min-height: 200px; }
+.spam-check { border-top: 1px solid var(--line); padding: var(--sp-3) var(--sp-4); font-size: 13px; }
+.spam-check.ok { display: flex; align-items: center; gap: var(--sp-2); }
+.spam-check ul { list-style: none; margin: var(--sp-2) 0; padding: 0; display: grid; gap: var(--sp-2); }
+.spam-check li { display: flex; gap: var(--sp-2); align-items: flex-start; line-height: 1.5; }
+.spam-check li .email-tag { flex: none; }
+.spam-check p { margin: 0; font-size: 12px; }
 .tpl-ai { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
 .tpl-ai .form-input { flex: 1 1 200px; min-width: 0; height: 32px; }
 .tpl-ai-note { font-size: var(--fs-caption); margin: 0; }
