@@ -1607,6 +1607,12 @@ function swAuditSummary(o) {
 
 // SiteWatch's two reports: Basic (scores and main problems, the one emails link) and
 // Advanced (every check). Any report link of a scan starts with the Basic one.
+// SiteWatch's risk (0 = nothing wrong) shown the way its reports show it: a
+// security score, 100 minus the risk, so higher is better like UI and SEO.
+function swSecurityScore(risk) {
+  return Math.max(0, Math.min(100, 100 - (Number(risk) || 0)));
+}
+
 function swBasicUrl(...urls) {
   for (const u of urls) {
     const s = String(u || '').trim();
@@ -1680,7 +1686,7 @@ async function loadSitewatch(recheck) {
       const result = s.state === 'pending'
         ? '<span class="email-tag guess"><span class="spinner" aria-hidden="true" style="width:10px;height:10px;margin-right:4px"></span>scanning</span>'
         : s.state === 'failed' ? '<span class="email-tag invalid" title="' + escHtml(s.error || '') + '">failed</span>'
-        : swStatusTag(s.status) + (typeof s.score === 'number' ? '<div class="muted" style="margin-top:4px">risk ' + s.score + '/100</div>' : '');
+        : swStatusTag(s.status) + (typeof s.score === 'number' ? '<div class="muted" style="margin-top:4px">security score ' + swSecurityScore(s.score) + '/100</div>' : '');
       const found = s.state === 'done'
         ? (s.issues ? '<b>' + s.issues + ' security problem' + (s.issues === 1 ? '' : 's') + '</b><div class="sw-issue-text">' + escHtml(s.issue_text || '') + '</div>'
                     : '<span class="muted">No security problems worth mentioning</span>') + swAuditSummary(s)
@@ -1729,12 +1735,15 @@ async function toggleSitewatch() {
 
 function swFindingsHtml(r, url) {
   const shown = r.findings.filter(f => f.severity !== 'info');
-  const tone = {review: 'review', critical: 'critical'}[r.status] || '';
+  // Coloured by the score like SiteWatch's reports (green 70+, yellow 50-69, red under 50);
+  // a possible compromise is always red.
+  const sec = swSecurityScore(r.score);
+  const tone = r.status === 'critical' || sec < 50 ? 'critical' : sec < 70 ? 'review' : '';
   const head = '<div class="sw-result-head"><div><div class="sw-site">' + escHtml(url || '') + '</div>' +
       '<div class="muted">' + (shown.length ? shown.length + ' problem' + (shown.length === 1 ? '' : 's') + ' found' : 'No problems found') + '</div></div>' +
     '<div class="sw-risk">' + swStatusTag(r.status) +
-      '<span class="sw-meter ' + tone + '"><span style="width:' + Math.max(3, Math.min(100, r.score)) + '%"></span></span>' +
-      'risk ' + r.score + '/100</div></div>';
+      '<span class="sw-meter ' + tone + '"><span style="width:' + Math.max(3, swSecurityScore(r.score)) + '%"></span></span>' +
+      'security score ' + swSecurityScore(r.score) + '/100</div></div>';
   const sev = {critical: 'invalid', high: 'invalid', medium: 'risky'};
   const list = shown.length ? '<ul class="sw-findings">' + shown.map(f =>
       '<li><span class="email-tag ' + (sev[f.severity] || 'guess') + '">' + escHtml(f.severity) + '</span><div>' +
@@ -2741,7 +2750,7 @@ function companyInfoCard(company, profile) {
   const swReport = (swIssues && swIssues.evidence_url) || (swStatus && swStatus.evidence_url) || '';
   const sitewatch = (swIssues || swStatus)
     ? (swStatus ? '<b>' + escHtml(swStatus.value_text || '') + '</b>' +
-        (swStatus.value_num !== null ? ' (risk ' + escHtml(String(swStatus.value_num)) + '/100)' : '') : '') +
+        (swStatus.value_num !== null ? ' (security score ' + swSecurityScore(swStatus.value_num) + '/100)' : '') : '') +
       (swIssues ? (swStatus ? ' · ' : '') + escHtml(String(swIssues.value_num || 0)) + ' issue(s)' +
         (swIssues.value_text ? '<br>' + escHtml(swIssues.value_text) : '') : '') +
       (swReport ? '<br>' + link(swBasicUrl(swReport), 'Reports') : '')
